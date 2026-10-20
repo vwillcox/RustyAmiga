@@ -137,7 +137,9 @@ fn run_file(path: &std::path::Path, verbose: usize) -> (usize, usize, usize) {
         got[15] = cpu.usp();
         got[16] = cpu.ssp();
         got[17] = cpu.sr() as u32;
-        got[18] = cpu.pc.wrapping_add(4);
+        // The reported PC includes the two-word prefetch queue, which a stopped
+        // 68000 does not refill after STOP.
+        got[18] = if cpu.stopped { cpu.pc } else { cpu.pc.wrapping_add(4) };
         let mut errs = vec![];
         for i in 0..19 {
             let (mut g, mut e) = (got[i], fin.regs[i]);
