@@ -25,7 +25,7 @@
 
 ## Known issues and open items
 
-- **Powerball (1997): new regression.** It showed a picture before tonight's batch of changes and is blank after them. The cause is most likely the prefetch timing change or the POT counters. Bisect this first next session.
+- **Powerball works (not a regression).** Its intro sequence includes black gaps, and the menu only appears at about frame 7000 (140 s), or frame 5750 with turbo floppy. The 90 s single-frame check landed on a black gap.
 - **Voyage (Razor 1911): protection fails.** It uses a trace-mode decoder that modifies its handler's own code. Prefetch emulation helped, but the decrypted check still fails and the demo resets. The next suspect is the key in d6, which may be derived from timing.
 - **Tie Break works but is slow.** Its trackloader takes about 100 s at authentic disk speed, so the 90 s automated test marked it blank. Use warp (End).
 - **Rink-a-Dink works.** It waits for a left mouse click after the intro, so the automated test showed black.
@@ -41,6 +41,5 @@
 
 ## Next milestones
 
-1. Fix the Powerball regression.
-2. HDF hard-disk support.
-3. 68020 CPU and the AGA chipset.
+1. HDF hard-disk support.
+2. 68020 CPU and the AGA chipset.
