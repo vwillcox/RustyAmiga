@@ -1,7 +1,15 @@
 //! Motorola 68000 / 68020 interpreter.
 
+mod fpu;
 mod ops;
 mod ops020;
+
+pub use fpu::FpuModel;
+
+/// Extended-precision conversions (exposed for tests and debuggers).
+pub mod fpu_ext {
+    pub use super::fpu::{ext_to_f64 as to_f64, f64_to_ext as from_f64};
+}
 
 use crate::bus::Bus;
 
@@ -123,6 +131,15 @@ pub struct Cpu {
     /// interrupt stack pointer is simply the SSP.
     pub msp: u32,
     pub m: bool,
+
+    // Floating-point unit.
+    pub fpu: FpuModel,
+    pub fp: [f64; 8],
+    pub fpcr: u32,
+    pub fpsr: u32,
+    pub fpiar: u32,
+    /// Set once an FPU instruction runs; FSAVE then writes an idle frame.
+    fpu_used: bool,
 }
 
 impl Cpu {
@@ -154,6 +171,11 @@ impl Cpu {
         self.vbr = 0;
         self.cacr = 0;
         self.m = false;
+        self.fp = [f64::NAN; 8];
+        self.fpcr = 0;
+        self.fpsr = 0;
+        self.fpiar = 0;
+        self.fpu_used = false;
         self.a[7] = self.read32(bus, 0);
         self.pc = self.read32(bus, 4);
     }

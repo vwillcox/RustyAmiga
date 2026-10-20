@@ -64,6 +64,7 @@ pub struct Config {
     pub mb_kb: u32,
     /// Zorro III fast RAM (A3000/A4000).
     pub z3_kb: u32,
+    pub fpu: crate::cpu::FpuModel,
     pub ntsc: bool,
     pub turbo_floppy: bool,
     pub drives: usize,
@@ -84,6 +85,10 @@ impl Config {
             fast_kb: 0,
             mb_kb: if model.addr32() { 4096 } else { 0 },
             z3_kb: 0,
+            fpu: match model {
+                Model::A3000 | Model::A4000 => crate::cpu::FpuModel::M68882,
+                _ => crate::cpu::FpuModel::None,
+            },
             ntsc: false,
             turbo_floppy: false,
             drives: 1,

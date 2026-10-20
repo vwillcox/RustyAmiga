@@ -1803,7 +1803,8 @@ pub struct Amiga {
 
 impl Amiga {
     pub fn new(cfg: Config, rom: Vec<u8>) -> Amiga {
-        let cpu = crate::cpu::Cpu::with_model(cfg.model.cpu());
+        let mut cpu = crate::cpu::Cpu::with_model(cfg.model.cpu());
+        cpu.fpu = cfg.fpu;
         let mut a = Amiga { cpu, board: Board::new(cfg, rom), pc_history: None, breakpoint: None, break_hit: false, tracepoint: None, trace_range: None };
         a.hard_reset();
         a

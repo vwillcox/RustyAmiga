@@ -45,6 +45,9 @@ struct Args {
     /// Fast RAM in KB: Zorro II (autoconfig), or motherboard RAM on the A3000/A4000.
     #[arg(long)]
     fast: Option<u32>,
+    /// Floating-point unit: none, 68881 or 68882 (default: per model).
+    #[arg(long)]
+    fpu: Option<String>,
     /// Zorro III fast RAM in KB (A3000/A4000).
     #[arg(long)]
     z3: Option<u32>,
@@ -282,6 +285,19 @@ fn main() {
     }
     if let Some(z) = args.z3 {
         cfg.z3_kb = z;
+    }
+    let fpu_name = args.fpu.clone().or_else(|| {
+        let r = rp9.as_ref()?;
+        // A title asking for a 68040 uses its FPU; give it a 68882 meanwhile.
+        r.fpu.clone().or_else(|| (r.cpu.as_deref() == Some("68040")).then(|| "68882".to_string()))
+    });
+    if let Some(f) = fpu_name {
+        cfg.fpu = match f.as_str() {
+            "none" => amiga::cpu::FpuModel::None,
+            "68881" => amiga::cpu::FpuModel::M68881,
+            "68882" => amiga::cpu::FpuModel::M68882,
+            _ => die(format!("unknown FPU {f} (none, 68881, 68882)")),
+        };
     }
     cfg.ntsc = args.ntsc;
     cfg.turbo_floppy |= args.turbo_floppy;

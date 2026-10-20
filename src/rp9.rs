@@ -13,6 +13,8 @@ pub struct Rp9 {
     pub kind: String,
     /// CPU named by the package (e.g. "68020"), if any.
     pub cpu: Option<String>,
+    /// FPU named by the package ("68881"/"68882"), if any.
+    pub fpu: Option<String>,
     pub system: String,
     pub system_rom: Option<u32>,
     pub fast_ram: u32,
@@ -162,7 +164,11 @@ fn parse_manifest(xml: &str) -> Rp9 {
             rp.turbo_floppy = true;
         }
     }
-    for (attrs, _) in tag_text(xml, "peripheral") {
+    for (attrs, text) in tag_text(xml, "peripheral") {
+        if text == "fpu" {
+            rp.fpu = attr(attrs, "type").map(str::to_string);
+            continue;
+        }
         match attr(attrs, "type") {
             Some("dd") => {
                 if let Some(u) = attr(attrs, "unit").and_then(|u| u.parse::<usize>().ok()) {

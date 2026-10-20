@@ -31,6 +31,9 @@ impl Cpu {
             0xd => self.addsub(bus, op, true),
             0xe => self.linee(bus, op),
             _ => {
+                if (op >> 9) & 7 == 1 && self.has_fpu() {
+                    return self.fpu_op(bus, op);
+                }
                 let pc = self.instr_pc;
                 self.exception(bus, VEC_LINE_F, pc);
             }

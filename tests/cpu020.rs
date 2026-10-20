@@ -251,3 +251,53 @@ fn unaligned_long_read() {
     run(&mut c, &mut m, 1);
     assert_eq!(c.d[0], 0x1122_3344);
 }
+
+fn with_fpu(code: &[u16]) -> (Cpu, Mem) {
+    let (mut c, m) = setup(code);
+    c.fpu = amiga::cpu::FpuModel::M68882;
+    (c, m)
+}
+
+#[test]
+fn fpu_arith_and_branch() {
+    // FMOVE.L #3,FP0; FMOVE.L #4,FP1; FADD.X FP0,FP1; FMOVE.L FP1,D0;
+    // FCMP.X FP0,FP1; FBGT.W +4; MOVEQ #1,D1; NOP
+    let (mut c, mut m) = with_fpu(&[
+        0xf23c, 0x4000, 0, 3, 0xf23c, 0x4080, 0, 4, 0xf200, 0x00a2, 0xf200, 0x6080, 0xf200, 0x00b8, 0xf292, 0x0004,
+        0x7201, 0x4e71,
+    ]);
+    run(&mut c, &mut m, 6);
+    assert_eq!(c.d[0], 7);
+    assert_eq!(c.pc, CODE + 34, "FBGT taken over MOVEQ");
+}
+
+#[test]
+fn fpu_extended_round_trip() {
+    use amiga::cpu::fpu_ext;
+    let one = [0x3f, 0xff, 0, 0, 0x80, 0, 0, 0, 0, 0, 0, 0];
+    assert_eq!(fpu_ext::to_f64(&one), 1.0);
+    for v in [1.0, -2.5, 1e-300, 3.141592653589793, 6.02e23] {
+        assert_eq!(fpu_ext::to_f64(&fpu_ext::from_f64(v)), v);
+    }
+}
+
+#[test]
+fn fpu_fmovem_predecrement_order() {
+    // FMOVE.L #1,FP0; FMOVE.L #2,FP1; FMOVEM.X FP0/FP1,-(A7)
+    let (mut c, mut m) = with_fpu(&[0xf23c, 0x4000, 0, 1, 0xf23c, 0x4080, 0, 2, 0xf227, 0xe003]);
+    run(&mut c, &mut m, 3);
+    assert_eq!(c.a[7], 0x8000 - 24);
+    assert_eq!(m.read16(0x8000 - 24), 0x3fff, "FP0 (1.0) at the lowest address");
+    assert_eq!(m.read16(0x8000 - 12), 0x4000, "FP1 (2.0) above it");
+}
+
+#[test]
+fn fpu_fsave_frames() {
+    // FSAVE -(A7) before any FPU use writes a null frame, afterwards an idle frame.
+    let (mut c, mut m) = with_fpu(&[0xf327, 0xf23c, 0x4000, 0, 1, 0xf327]);
+    run(&mut c, &mut m, 1);
+    assert_eq!((c.a[7], m.get_long(c.a[7])), (0x8000 - 4, 0));
+    run(&mut c, &mut m, 2);
+    assert_eq!(m.get_long(c.a[7]), 0x1f38_0000);
+    assert_eq!(c.a[7], 0x8000 - 4 - 4 - 0x38);
+}
