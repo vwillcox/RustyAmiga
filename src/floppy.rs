@@ -304,6 +304,10 @@ pub struct Drive {
     pub changed: bool,
     pub pos: usize,
     pub step_line: bool,
+    /// High-density drive (identifies as such when an HD disk is inserted).
+    pub hd: bool,
+    /// Position in the 32-bit drive ID shifted out on /RDY while the motor is off.
+    pub id_pos: u8,
 }
 
 impl Drive {
@@ -318,7 +322,25 @@ impl Drive {
             changed: true,
             pos: 0,
             step_line: true,
+            hd: false,
+            id_pos: 0,
         }
+    }
+
+    /// Drive identification as disk.resource sees it (a 1 bit is /RDY high):
+    /// $00000000 for a 3.5" DD drive (or an HD drive holding a DD disk),
+    /// $AAAAAAAA for an HD drive with an HD disk (it spins at 150 RPM).
+    pub fn id(&self) -> u32 {
+        if self.hd && self.disk.as_ref().is_some_and(|d| d.sectors == 22) {
+            0xaaaa_aaaa
+        } else {
+            0
+        }
+    }
+
+    /// /RDY asserted (low): ready while the motor runs, otherwise the next ID bit.
+    pub fn ready(&self) -> bool {
+        self.motor || self.id() & (0x8000_0000 >> (self.id_pos & 31)) == 0
     }
 
     pub fn track_index(&self) -> usize {
@@ -326,6 +348,10 @@ impl Drive {
     }
 
     pub fn insert(&mut self, disk: Disk) {
+        // An HD image needs an HD drive; fit one rather than refuse the disk.
+        if disk.sectors == 22 {
+            self.hd = true;
+        }
         self.disk = Some(disk);
         self.changed = true;
     }

@@ -52,13 +52,16 @@ The A590/A2091 controller is emulated at the hardware level and driven by Commod
 - **Lisa's DENISEID now reads `$00F8`.** Its upper byte is the revision; with `$FF` there, graphics.library built an ECS-limited display database and 8-plane OS screens failed to open. This fixed about a dozen OS-friendly AGA demos.
 - **An empty IDE port reads `$FF`.** Previously scsi.device retried its probe 30 times, which delayed every A1200 floppy boot.
 
+### HD floppies
+Drives report their ID on /RDY while the motor is off (disk.resource reads a 1 where /RDY is high): DD drives read `$00000000`, and HD drives holding an HD disk read `$AAAAAAAA`. Inserting a 1.76 MB image makes the drive an HD drive. HD tracks are twice as long, so the 150 RPM rotation comes out naturally.
+
 ### Front-panel lights
 The window shows power, per-drive floppy (green: motor on; blinking yellow: disk DMA running) and hard disk (amber: busy) lights under the picture. `--leds` adds them to headless screenshots.
 
 ### Remaining open items
 - **No picture within 90 s:** Concrete, HOG, Lux Aeterna Luceat Eis, Mental, Psylteflesk, Tour de Scene and The Chronicles of Professor Arronax (A4000); Aerial Racers, AmiBee and Overdose (A1200 floppies; Overdose plays music with bitplane DMA off).
 - **Still precalculating at 90 s:** Incision, Lapsuus, Multiverse and The Castle.
-- **Not emulated:** HD floppy drives (Christmas Breakdown), the A3000 model, CD32/CDTV, PowerPC boards, and Amiga Forever host-folder drives (A4000 Enhanced, AROS, Walker).
+- **Not emulated:** the A3000 model, CD32/CDTV, PowerPC boards, and Amiga Forever host-folder drives (A4000 Enhanced, AROS, Walker).
 - **Not Amiga software:** the Videos and Gallery packages (DVD video and host images for Amiga Forever's player). The emulator now refuses them with that explanation.
 
 ## Known issues and open items
@@ -79,5 +82,5 @@ The window shows power, per-drive floppy (green: motor on; blinking yellow: disk
 
 ## Next milestones
 
-1. HD floppy drives; the A3000 (ECS, 68030, SDMAC SCSI).
+1. The A3000 (ECS, 68030, SDMAC SCSI).
 2. The remaining blank AGA titles; CD32/CDTV.

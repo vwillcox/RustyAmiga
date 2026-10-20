@@ -820,6 +820,12 @@ impl Board {
             let sel = new & bit == 0;
             let was = old & bit == 0;
             if sel && !was {
+                // The drive latches MTR on SEL's falling edge. Switching the motor
+                // off resets the ID shift register; each further select with the
+                // motor off shifts out the next ID bit.
+                if !motor {
+                    d.id_pos = if d.motor { 0xff } else { d.id_pos.wrapping_add(1) };
+                }
                 d.motor = motor;
             }
             d.selected = sel;
@@ -846,7 +852,9 @@ impl Board {
             v &= !0x40;
         }
         for d in self.drives.iter().filter(|d| d.selected && d.present) {
-            v &= !0x20; // /RDY: present 3.5" DD drive (ID mode reads all ones)
+            if d.ready() {
+                v &= !0x20;
+            }
             if d.cyl == 0 {
                 v &= !0x10;
             }
