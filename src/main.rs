@@ -45,6 +45,13 @@ struct Args {
     /// Fast RAM in KB: Zorro II (autoconfig), or motherboard RAM on the A3000/A4000.
     #[arg(long)]
     fast: Option<u32>,
+    /// CPU speed as a multiple of a 7 MHz 68000 (default: per model; 8 for
+    /// RP9 packages that ask for maximum speed).
+    #[arg(long)]
+    cpu_speed: Option<f32>,
+    /// CPU: 68000, 68020, 68030 or 68040 (default: per model).
+    #[arg(long)]
+    cpu: Option<String>,
     /// Floating-point unit: none, 68881 or 68882 (default: per model).
     #[arg(long)]
     fpu: Option<String>,
@@ -286,11 +293,31 @@ fn main() {
     if let Some(z) = args.z3 {
         cfg.z3_kb = z;
     }
-    let fpu_name = args.fpu.clone().or_else(|| {
-        let r = rp9.as_ref()?;
-        // A title asking for a 68040 uses its FPU; give it a 68882 meanwhile.
-        r.fpu.clone().or_else(|| (r.cpu.as_deref() == Some("68040")).then(|| "68882".to_string()))
-    });
+    if rp9.as_ref().is_some_and(|r| r.cpu_max) {
+        cfg.cpu_speed = cfg.cpu_speed.max(8.0);
+    }
+    if let Some(sp) = args.cpu_speed {
+        cfg.cpu_speed = sp.clamp(1.0, 64.0);
+    }
+    if let Some(c) = args.cpu.clone().or_else(|| rp9.as_ref().and_then(|r| r.cpu.clone())) {
+        use amiga::cpu::{CpuModel, FpuModel};
+        cfg.cpu = match c.as_str() {
+            "68000" => CpuModel::M68000,
+            "68020" | "68ec020" => CpuModel::M68020,
+            "68030" => CpuModel::M68030,
+            "68040" | "68060" => CpuModel::M68040,
+            _ => die(format!("unknown CPU {c} (68000, 68020, 68030, 68040)")),
+        };
+        if cfg.cpu == CpuModel::M68040 {
+            cfg.fpu = FpuModel::M68040;
+        } else if cfg.fpu == FpuModel::M68040 {
+            cfg.fpu = FpuModel::M68882;
+        }
+        if cfg.cpu != CpuModel::M68000 && !model.addr32() && model.cpu() == CpuModel::M68000 {
+            log::warn!("{c} on a {model:?}: expect 24-bit addressing");
+        }
+    }
+    let fpu_name = args.fpu.clone().or_else(|| rp9.as_ref().and_then(|r| r.fpu.clone()));
     if let Some(f) = fpu_name {
         cfg.fpu = match f.as_str() {
             "none" => amiga::cpu::FpuModel::None,

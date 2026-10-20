@@ -34,6 +34,12 @@ impl Cpu {
                 if (op >> 9) & 7 == 1 && self.has_fpu() {
                     return self.fpu_op(bus, op);
                 }
+                if (op >> 9) & 7 == 0 && self.model == CpuModel::M68030 {
+                    return self.mmu030(bus, op);
+                }
+                if matches!(op & 0xff00, 0xf400 | 0xf500 | 0xf600) && self.model == CpuModel::M68040 {
+                    return self.line_f_040(bus, op);
+                }
                 let pc = self.instr_pc;
                 self.exception(bus, VEC_LINE_F, pc);
             }

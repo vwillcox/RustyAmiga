@@ -150,6 +150,12 @@ pub struct Board {
     pub serial_out: Vec<u8>,
     /// PC of the instruction being executed (for device tracing).
     pub cur_pc: u32,
+    /// CPU speed relative to a 7 MHz 68000, in 1/16ths. Accesses that do not
+    /// wait for the chip bus, and internal cycles, cost proportionally less.
+    cpu_mult16: u32,
+    cycle_frac: u32,
+    /// A3000/A4000 Ramsey memory controller control register ($DE0003).
+    ramsey_ctl: u8,
 }
 
 impl AudioMem for (&Vec<u8>, u32) {
@@ -255,6 +261,9 @@ impl Board {
             diwhigh: None,
             serial_out: vec![],
             cur_pc: 0,
+            cpu_mult16: ((cfg.cpu_speed * 16.0) as u32).max(16),
+            cycle_frac: 0,
+            ramsey_ctl: 0,
             cfg,
         }
     }
@@ -265,6 +274,18 @@ impl Board {
 
     fn ocs(&self) -> bool {
         self.cfg.model.chipset() == Chipset::Ocs
+    }
+
+    /// Account for `n` CPU clocks that do not touch the chip bus.
+    #[inline]
+    fn cpu_cycles(&mut self, n: u32) {
+        if self.cpu_mult16 == 16 {
+            self.cycles += n as u64;
+            return;
+        }
+        self.cycle_frac += n * 16;
+        self.cycles += (self.cycle_frac / self.cpu_mult16) as u64;
+        self.cycle_frac %= self.cpu_mult16;
     }
 
     fn aga(&self) -> bool {
@@ -1205,6 +1226,22 @@ impl Board {
         None
     }
 
+    /// Ramsey (A3000/A4000 memory controller): control at $DE0003, revision at
+    /// $DE0043. Fat Gary's registers in the same block read as zero.
+    fn ramsey_read(&self, a: u32) -> u8 {
+        match a & 0xffff {
+            0x0003 => self.ramsey_ctl,
+            0x0043 => 0x0f, // Ramsey-07
+            _ => 0,
+        }
+    }
+
+    fn ramsey_write(&mut self, a: u32, v: u8) {
+        if a & 0xffff == 0x0003 {
+            self.ramsey_ctl = v;
+        }
+    }
+
     /// Zorro III RAM board configuration registers, while unconfigured.
     fn z3_autoconfig_regs(&self) -> Option<[u8; 16]> {
         if self.z3_ram.is_empty() || self.z3_ac_done {
@@ -1417,6 +1454,7 @@ enum Region {
     Z3Config,
     Mb(usize),
     Z3(usize),
+    Ramsey,
     None,
 }
 
@@ -1455,6 +1493,7 @@ impl Board {
             0xdf => Region::Custom,
             0xd8..=0xdb | 0xde if self.gayle.as_ref().is_some_and(|g| !g.a4000) => Region::Gayle,
             0xdd if self.gayle.as_ref().is_some_and(|g| g.a4000) => Region::Gayle,
+            0xde if self.cfg.model.addr32() => Region::Ramsey,
             0xe8 => Region::Autoconfig,
             0xe9..=0xef if self.scsi.as_ref().and_then(|s| s.contains(a)).is_some() => {
                 Region::Scsi(self.scsi.as_ref().unwrap().contains(a).unwrap())
@@ -1504,27 +1543,31 @@ impl Bus for Board {
                 self.slow[o]
             }
             Region::Fast(o) => {
-                self.cycles += 4;
+                self.cpu_cycles(4);
                 self.fast[o]
             }
             Region::Mb(o) => {
-                self.cycles += 4;
+                self.cpu_cycles(4);
                 self.mb_ram[o]
             }
             Region::Z3(o) => {
-                self.cycles += 4;
+                self.cpu_cycles(4);
                 self.z3_ram[o]
             }
             Region::Z3Config => {
-                self.cycles += 4;
+                self.cpu_cycles(4);
                 self.z3_config_read(addr)
             }
+            Region::Ramsey => {
+                self.cpu_cycles(4);
+                self.ramsey_read(addr)
+            }
             Region::Rom(o) => {
-                self.cycles += 4;
+                self.cpu_cycles(4);
                 self.rom[o]
             }
             Region::ExtRom(o) => {
-                self.cycles += 4;
+                self.cpu_cycles(4);
                 self.ext_rom[o]
             }
             Region::Custom => {
@@ -1546,17 +1589,17 @@ impl Bus for Board {
                 }
             }
             Region::Autoconfig => {
-                self.cycles += 4;
+                self.cpu_cycles(4);
                 self.autoconfig_read(addr)
             }
             Region::Gayle => {
-                self.cycles += 4;
+                self.cpu_cycles(4);
                 let v = self.gayle.as_mut().unwrap().read8(addr);
                 self.update_cia_irq();
                 v
             }
             Region::Scsi(o) => {
-                self.cycles += 4;
+                self.cpu_cycles(4);
                 let now = self.cycles;
                 let v = self.scsi.as_mut().unwrap().read8(o, now);
                 if o < 0x2000 {
@@ -1566,7 +1609,7 @@ impl Bus for Board {
                 v
             }
             Region::None => {
-                self.cycles += 4;
+                self.cpu_cycles(4);
                 0
             }
         }
@@ -1584,27 +1627,31 @@ impl Bus for Board {
                 (self.slow[o] as u16) << 8 | self.slow[o + 1] as u16
             }
             Region::Fast(o) => {
-                self.cycles += 4;
+                self.cpu_cycles(4);
                 (self.fast[o] as u16) << 8 | self.fast[o + 1] as u16
             }
             Region::Mb(o) => {
-                self.cycles += 4;
+                self.cpu_cycles(4);
                 (self.mb_ram[o] as u16) << 8 | self.mb_ram[o + 1] as u16
             }
             Region::Z3(o) => {
-                self.cycles += 4;
+                self.cpu_cycles(4);
                 (self.z3_ram[o] as u16) << 8 | self.z3_ram[o + 1] as u16
             }
             Region::Z3Config => {
-                self.cycles += 4;
+                self.cpu_cycles(4);
                 (self.z3_config_read(addr) as u16) << 8 | 0xff
             }
+            Region::Ramsey => {
+                self.cpu_cycles(4);
+                (self.ramsey_read(addr) as u16) << 8 | self.ramsey_read(addr + 1) as u16
+            }
             Region::Rom(o) => {
-                self.cycles += 4;
+                self.cpu_cycles(4);
                 (self.rom[o] as u16) << 8 | self.rom[o + 1] as u16
             }
             Region::ExtRom(o) => {
-                self.cycles += 4;
+                self.cpu_cycles(4);
                 (self.ext_rom[o] as u16) << 8 | self.ext_rom[o + 1] as u16
             }
             Region::Custom => {
@@ -1616,17 +1663,17 @@ impl Bus for Board {
                 self.cia_read(addr)
             }
             Region::Autoconfig => {
-                self.cycles += 4;
+                self.cpu_cycles(4);
                 (self.autoconfig_read(addr) as u16) << 8 | 0xff
             }
             Region::Gayle => {
-                self.cycles += 4;
+                self.cpu_cycles(4);
                 let v = self.gayle.as_mut().unwrap().read16(addr);
                 self.update_cia_irq();
                 v
             }
             Region::Scsi(o) => {
-                self.cycles += 4;
+                self.cpu_cycles(4);
                 let now = self.cycles;
                 let v = self.scsi.as_mut().unwrap().read16(o, now);
                 if o < 0x2000 {
@@ -1636,7 +1683,7 @@ impl Bus for Board {
                 v
             }
             Region::None => {
-                self.cycles += 4;
+                self.cpu_cycles(4);
                 0
             }
         }
@@ -1653,20 +1700,24 @@ impl Bus for Board {
                 self.slow[o] = v;
             }
             Region::Fast(o) => {
-                self.cycles += 4;
+                self.cpu_cycles(4);
                 self.fast[o] = v;
             }
             Region::Mb(o) => {
-                self.cycles += 4;
+                self.cpu_cycles(4);
                 self.mb_ram[o] = v;
             }
             Region::Z3(o) => {
-                self.cycles += 4;
+                self.cpu_cycles(4);
                 self.z3_ram[o] = v;
             }
             Region::Z3Config => {
-                self.cycles += 4;
+                self.cpu_cycles(4);
                 self.z3_config_write(addr, v as u16, false);
+            }
+            Region::Ramsey => {
+                self.cpu_cycles(4);
+                self.ramsey_write(addr, v);
             }
             Region::Custom => {
                 self.chip_access();
@@ -1679,22 +1730,22 @@ impl Bus for Board {
                 self.cia_write(addr, w, addr & 1 == 0, addr & 1 == 1);
             }
             Region::Autoconfig => {
-                self.cycles += 4;
+                self.cpu_cycles(4);
                 self.autoconfig_write(addr, v);
             }
             Region::Gayle => {
-                self.cycles += 4;
+                self.cpu_cycles(4);
                 self.gayle.as_mut().unwrap().write8(addr, v);
                 self.update_cia_irq();
             }
             Region::Scsi(o) => {
-                self.cycles += 4;
+                self.cpu_cycles(4);
                 let now = self.cycles;
                 log::trace!("a2091 pc={:06x} write8( {o:02x} = {v:x}", self.cur_pc);
                 self.scsi.as_mut().unwrap().write8(o, v, now);
                 self.update_cia_irq();
             }
-            Region::Rom(_) | Region::ExtRom(_) | Region::None => self.cycles += 4,
+            Region::Rom(_) | Region::ExtRom(_) | Region::None => self.cpu_cycles(4),
         }
     }
 
@@ -1712,23 +1763,28 @@ impl Bus for Board {
                 self.slow[o + 1] = v as u8;
             }
             Region::Fast(o) => {
-                self.cycles += 4;
+                self.cpu_cycles(4);
                 self.fast[o] = (v >> 8) as u8;
                 self.fast[o + 1] = v as u8;
             }
             Region::Mb(o) => {
-                self.cycles += 4;
+                self.cpu_cycles(4);
                 self.mb_ram[o] = (v >> 8) as u8;
                 self.mb_ram[o + 1] = v as u8;
             }
             Region::Z3(o) => {
-                self.cycles += 4;
+                self.cpu_cycles(4);
                 self.z3_ram[o] = (v >> 8) as u8;
                 self.z3_ram[o + 1] = v as u8;
             }
             Region::Z3Config => {
-                self.cycles += 4;
+                self.cpu_cycles(4);
                 self.z3_config_write(addr, v, true);
+            }
+            Region::Ramsey => {
+                self.cpu_cycles(4);
+                self.ramsey_write(addr, (v >> 8) as u8);
+                self.ramsey_write(addr + 1, v as u8);
             }
             Region::Custom => {
                 self.chip_access();
@@ -1739,28 +1795,28 @@ impl Bus for Board {
                 self.cia_write(addr, v, true, true);
             }
             Region::Autoconfig => {
-                self.cycles += 4;
+                self.cpu_cycles(4);
                 self.autoconfig_write(addr, (v >> 8) as u8);
             }
             Region::Gayle => {
-                self.cycles += 4;
+                self.cpu_cycles(4);
                 self.gayle.as_mut().unwrap().write16(addr, v);
                 self.update_cia_irq();
             }
             Region::Scsi(o) => {
-                self.cycles += 4;
+                self.cpu_cycles(4);
                 let now = self.cycles;
                 log::trace!("a2091 pc={:06x} write16 {o:02x} = {v:x}", self.cur_pc);
                 self.scsi.as_mut().unwrap().write16(o, v, now);
                 self.update_cia_irq();
             }
-            Region::Rom(_) | Region::ExtRom(_) | Region::None => self.cycles += 4,
+            Region::Rom(_) | Region::ExtRom(_) | Region::None => self.cpu_cycles(4),
         }
     }
 
     #[inline]
     fn idle(&mut self, cycles: u32) {
-        self.cycles += cycles as u64;
+        self.cpu_cycles(cycles);
     }
 
     fn ipl(&mut self) -> u8 {
@@ -1803,7 +1859,7 @@ pub struct Amiga {
 
 impl Amiga {
     pub fn new(cfg: Config, rom: Vec<u8>) -> Amiga {
-        let mut cpu = crate::cpu::Cpu::with_model(cfg.model.cpu());
+        let mut cpu = crate::cpu::Cpu::with_model(cfg.cpu);
         cpu.fpu = cfg.fpu;
         let mut a = Amiga { cpu, board: Board::new(cfg, rom), pc_history: None, breakpoint: None, break_hit: false, tracepoint: None, trace_range: None };
         a.hard_reset();

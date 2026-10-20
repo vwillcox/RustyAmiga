@@ -44,15 +44,23 @@ impl Cpu {
             match ctl {
                 0x000 => self.sfc = (v & 7) as u8,
                 0x001 => self.dfc = (v & 7) as u8,
-                // 68020 CACR: only E (enable) and F (freeze) are stored; C and CE
-                // are commands that read back as zero. Exec relies on this to tell
-                // the 68020 from the 68030/040.
-                0x002 => self.cacr = v & 3,
+                // CACR keeps only the bits each CPU implements; command bits
+                // read back as zero. Exec relies on this to tell the CPUs apart.
+                0x002 => {
+                    self.cacr = v & match self.model {
+                        CpuModel::M68040 => 0x8000_8000,
+                        CpuModel::M68030 => 0x0000_3313,
+                        _ => 0x0000_0003,
+                    }
+                }
                 0x800 => self.set_usp(v),
                 0x801 => self.vbr = v,
-                0x802 => self.caar = v,
+                0x802 if self.model != CpuModel::M68040 => self.caar = v,
                 0x803 => self.msp = v,
                 0x804 => self.set_ssp(v),
+                0x003..=0x007 | 0x805..=0x807 if self.model == CpuModel::M68040 => {
+                    self.mmu[Self::mmu040_index(ctl)] = v as u64;
+                }
                 _ => return self.illegal(bus),
             }
         } else {
@@ -62,15 +70,142 @@ impl Cpu {
                 0x002 => self.cacr,
                 0x800 => self.usp(),
                 0x801 => self.vbr,
-                0x802 => self.caar,
+                0x802 if self.model != CpuModel::M68040 => self.caar,
                 0x803 => self.msp,
                 0x804 => self.ssp(),
+                0x003..=0x007 | 0x805..=0x807 if self.model == CpuModel::M68040 => {
+                    self.mmu[Self::mmu040_index(ctl)] as u32
+                }
                 _ => return self.illegal(bus),
             };
             if is_a {
                 self.a[r] = v;
             } else {
                 self.d[r] = v;
+            }
+        }
+    }
+
+    /// Slot in `mmu` for a 68040 MOVEC control register.
+    fn mmu040_index(ctl: u16) -> usize {
+        match ctl {
+            0x003 => 0, // TC
+            0x004 => 1, // ITT0
+            0x005 => 2, // ITT1
+            0x006 => 3, // DTT0
+            0x007 => 4, // DTT1
+            0x805 => 5, // MMUSR
+            0x806 => 6, // URP
+            _ => 7,     // SRP
+        }
+    }
+
+    /// 68030 MMU instructions (coprocessor ID 0): PMOVE, PFLUSH, PTEST, PLOAD.
+    /// Register contents are kept so software can read them back.
+    pub(super) fn mmu030<B: Bus>(&mut self, bus: &mut B, op: u16) {
+        if !self.s {
+            return self.privilege_violation(bus);
+        }
+        let ext = self.fetch16(bus);
+        let mode = (op >> 3) & 7;
+        let reg = op & 7;
+        match ext >> 13 {
+            // PMOVE to/from TT0/TT1 (000), TC/SRP/CRP (010), MMUSR (011).
+            0 | 2 | 3 => {
+                let preg = (ext >> 10) & 7;
+                let (slot, bytes) = match (ext >> 13, preg) {
+                    (0, 2) => (1, 4), // TT0
+                    (0, 3) => (2, 4), // TT1
+                    (2, 0) => (0, 4), // TC
+                    (2, 2) => (6, 8), // SRP
+                    (2, 3) => (7, 8), // CRP
+                    (3, _) => (5, 2), // MMUSR
+                    _ => return,
+                };
+                let to_mem = ext & 0x0200 != 0;
+                let sz = if bytes == 2 { Size::W } else { Size::L };
+                let ea = self.ea(bus, mode, reg, sz);
+                let addr = match ea {
+                    Ea::M(a) => a,
+                    _ => {
+                        // Register operands (TC, TT, MMUSR to Dn/An).
+                        if to_mem {
+                            let v = self.mmu[slot] as u32;
+                            self.write_ea(bus, ea, sz, v);
+                        } else {
+                            self.mmu[slot] = self.read_ea(bus, ea, sz) as u64;
+                        }
+                        return;
+                    }
+                };
+                if to_mem {
+                    let v = self.mmu[slot];
+                    if bytes == 8 {
+                        self.write(bus, addr, Size::L, (v >> 32) as u32);
+                        self.write(bus, addr.wrapping_add(4), Size::L, v as u32);
+                    } else {
+                        self.write(bus, addr, sz, v as u32);
+                    }
+                } else if bytes == 8 {
+                    let hi = self.read(bus, addr, Size::L) as u64;
+                    let lo = self.read(bus, addr.wrapping_add(4), Size::L) as u64;
+                    self.mmu[slot] = hi << 32 | lo;
+                } else {
+                    self.mmu[slot] = self.read(bus, addr, sz) as u64;
+                }
+            }
+            // PFLUSH / PLOAD / PTEST: no translation cache to manage.
+            _ => {
+                if mode >= 2 {
+                    let _ = self.ea(bus, mode, reg, Size::L);
+                }
+            }
+        }
+    }
+
+    /// 68040 cache and MMU maintenance and MOVE16 (op $F4xx-$F6xx).
+    pub(super) fn line_f_040<B: Bus>(&mut self, bus: &mut B, op: u16) {
+        match op & 0xff00 {
+            // CINV/CPUSH and PFLUSH/PTEST: caches and MMU are not modelled.
+            0xf400 | 0xf500 => {
+                if !self.s {
+                    self.privilege_violation(bus);
+                }
+            }
+            _ => {
+                // MOVE16: copy one 16-byte line.
+                let (src, dst) = if op & 0xfff8 == 0xf620 {
+                    let ext = self.fetch16(bus);
+                    let ax = (op & 7) as usize;
+                    let ay = ((ext >> 12) & 7) as usize;
+                    let (s, d) = (self.a[ax], self.a[ay]);
+                    self.a[ax] = s.wrapping_add(16);
+                    if ay != ax {
+                        self.a[ay] = d.wrapping_add(16);
+                    }
+                    (s, d)
+                } else {
+                    let ay = (op & 7) as usize;
+                    let abs = self.fetch32(bus);
+                    let a = self.a[ay];
+                    match (op >> 3) & 3 {
+                        0 => {
+                            self.a[ay] = a.wrapping_add(16);
+                            (a, abs)
+                        }
+                        1 => {
+                            self.a[ay] = a.wrapping_add(16);
+                            (abs, a)
+                        }
+                        2 => (a, abs),
+                        _ => (abs, a),
+                    }
+                };
+                let (src, dst) = (src & !15, dst & !15);
+                for i in 0..4 {
+                    let v = self.read(bus, src + i * 4, Size::L);
+                    self.write(bus, dst + i * 4, Size::L, v);
+                }
             }
         }
     }

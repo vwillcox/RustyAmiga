@@ -86,6 +86,10 @@ pub enum CpuModel {
     /// 68020 (the A1200's 68EC020 differs only in its 24-bit address bus,
     /// which the board decodes).
     M68020,
+    /// 68030: adds a data cache and an MMU (PMOVE and friends).
+    M68030,
+    /// 68040: on-chip MMU registers via MOVEC, MOVE16, CINV/CPUSH, built-in FPU.
+    M68040,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -131,6 +135,9 @@ pub struct Cpu {
     /// interrupt stack pointer is simply the SSP.
     pub msp: u32,
     pub m: bool,
+    /// MMU registers (68030: TC, TT0/1, CRP, SRP, MMUSR; 68040: TC, ITT0/1,
+    /// DTT0/1, URP, SRP, MMUSR). Translation itself is not emulated.
+    pub mmu: [u64; 8],
 
     // Floating-point unit.
     pub fpu: FpuModel,

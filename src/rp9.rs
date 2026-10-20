@@ -15,6 +15,8 @@ pub struct Rp9 {
     pub cpu: Option<String>,
     /// FPU named by the package ("68881"/"68882"), if any.
     pub fpu: Option<String>,
+    /// The package asks for the fastest CPU emulation (speed="max").
+    pub cpu_max: bool,
     pub system: String,
     pub system_rom: Option<u32>,
     pub fast_ram: u32,
@@ -177,6 +179,7 @@ fn parse_manifest(xml: &str) -> Rp9 {
             }
             Some(t) if t.starts_with("680") && t != "68000" && t != "68881" && t != "68882" => {
                 rp.cpu = Some(t.to_string());
+                rp.cpu_max |= attr(attrs, "speed") == Some("max");
             }
             _ => {}
         }

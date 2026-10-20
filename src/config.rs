@@ -48,7 +48,9 @@ impl Model {
 
     pub fn cpu(self) -> crate::cpu::CpuModel {
         match self {
-            Model::A1200 | Model::A3000 | Model::A4000 | Model::Cd32 => crate::cpu::CpuModel::M68020,
+            Model::A1200 | Model::Cd32 => crate::cpu::CpuModel::M68020,
+            Model::A3000 => crate::cpu::CpuModel::M68030,
+            Model::A4000 => crate::cpu::CpuModel::M68040,
             _ => crate::cpu::CpuModel::M68000,
         }
     }
@@ -64,7 +66,10 @@ pub struct Config {
     pub mb_kb: u32,
     /// Zorro III fast RAM (A3000/A4000).
     pub z3_kb: u32,
+    pub cpu: crate::cpu::CpuModel,
     pub fpu: crate::cpu::FpuModel,
+    /// CPU speed as a multiple of a 7 MHz 68000 (for non-chip-bus work).
+    pub cpu_speed: f32,
     pub ntsc: bool,
     pub turbo_floppy: bool,
     pub drives: usize,
@@ -85,9 +90,16 @@ impl Config {
             fast_kb: 0,
             mb_kb: if model.addr32() { 4096 } else { 0 },
             z3_kb: 0,
+            cpu: model.cpu(),
             fpu: match model {
-                Model::A3000 | Model::A4000 => crate::cpu::FpuModel::M68882,
+                Model::A3000 => crate::cpu::FpuModel::M68882,
+                Model::A4000 => crate::cpu::FpuModel::M68040,
                 _ => crate::cpu::FpuModel::None,
+            },
+            cpu_speed: match model {
+                Model::A1200 | Model::Cd32 => 2.0,
+                Model::A3000 | Model::A4000 => 4.0,
+                _ => 1.0,
             },
             ntsc: false,
             turbo_floppy: false,
