@@ -1,6 +1,7 @@
-//! Motorola 68000 interpreter.
+//! Motorola 68000 / 68020 interpreter.
 
 mod ops;
+mod ops020;
 
 use crate::bus::Bus;
 
@@ -67,7 +68,17 @@ pub const VEC_PRIVILEGE: u32 = 8;
 pub const VEC_TRACE: u32 = 9;
 pub const VEC_LINE_A: u32 = 10;
 pub const VEC_LINE_F: u32 = 11;
+pub const VEC_FORMAT_ERROR: u32 = 14;
 pub const VEC_TRAP_BASE: u32 = 32;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CpuModel {
+    #[default]
+    M68000,
+    /// 68020 (the A1200's 68EC020 differs only in its 24-bit address bus,
+    /// which the board decodes).
+    M68020,
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct Cpu {
@@ -100,6 +111,18 @@ pub struct Cpu {
     pq_addr: u32,
     pq: [u16; 2],
     pq_valid: bool,
+
+    pub model: CpuModel,
+    // 68010+/68020 control registers.
+    pub vbr: u32,
+    pub sfc: u8,
+    pub dfc: u8,
+    pub cacr: u32,
+    pub caar: u32,
+    /// Master stack pointer (68020 M bit). Amiga software never sets M, so the
+    /// interrupt stack pointer is simply the SSP.
+    pub msp: u32,
+    pub m: bool,
 }
 
 impl Cpu {
@@ -111,6 +134,15 @@ impl Cpu {
         }
     }
 
+    pub fn with_model(model: CpuModel) -> Self {
+        Cpu { model, ..Cpu::new() }
+    }
+
+    #[inline]
+    fn is_020(&self) -> bool {
+        self.model >= CpuModel::M68020
+    }
+
     /// Hardware reset: load SSP and PC from vectors 0 and 1.
     pub fn reset<B: Bus>(&mut self, bus: &mut B) {
         self.s = true;
@@ -119,6 +151,9 @@ impl Cpu {
         self.stopped = false;
         self.halted = false;
         self.pq_valid = false;
+        self.vbr = 0;
+        self.cacr = 0;
+        self.m = false;
         self.a[7] = self.read32(bus, 0);
         self.pc = self.read32(bus, 4);
     }
@@ -128,6 +163,7 @@ impl Cpu {
     pub fn sr(&self) -> u16 {
         (self.t as u16) << 15
             | (self.s as u16) << 13
+            | (self.m as u16) << 12
             | (self.imask as u16) << 8
             | self.ccr() as u16
     }
@@ -148,6 +184,9 @@ impl Cpu {
         self.set_ccr(v as u8);
         self.t = v & 0x8000 != 0;
         self.imask = ((v >> 8) & 7) as u8;
+        if self.is_020() {
+            self.m = v & 0x1000 != 0;
+        }
         self.set_supervisor(v & 0x2000 != 0);
     }
 
@@ -196,32 +235,56 @@ impl Cpu {
     fn read<B: Bus>(&mut self, bus: &mut B, addr: u32, sz: Size) -> u32 {
         match sz {
             Size::B => bus.read8(addr) as u32,
-            Size::W => bus.read16(addr) as u32,
+            Size::W => self.read16(bus, addr) as u32,
             Size::L => self.read32(bus, addr),
         }
     }
 
+    /// Word read; the 68020 allows odd addresses (done as byte cycles).
+    #[inline]
+    fn read16<B: Bus>(&mut self, bus: &mut B, addr: u32) -> u16 {
+        if addr & 1 != 0 && self.is_020() {
+            return (bus.read8(addr) as u16) << 8 | bus.read8(addr.wrapping_add(1)) as u16;
+        }
+        bus.read16(addr)
+    }
+
     #[inline]
     fn read32<B: Bus>(&mut self, bus: &mut B, addr: u32) -> u32 {
-        let hi = bus.read16(addr) as u32;
-        let lo = bus.read16(addr.wrapping_add(2)) as u32;
+        let hi = self.read16(bus, addr) as u32;
+        let lo = self.read16(bus, addr.wrapping_add(2)) as u32;
         hi << 16 | lo
+    }
+
+    #[inline]
+    fn write16<B: Bus>(&mut self, bus: &mut B, addr: u32, v: u16) {
+        if addr & 1 != 0 && self.is_020() {
+            bus.write8(addr, (v >> 8) as u8);
+            bus.write8(addr.wrapping_add(1), v as u8);
+            return;
+        }
+        bus.write16(addr, v);
     }
 
     #[inline]
     fn write<B: Bus>(&mut self, bus: &mut B, addr: u32, sz: Size, v: u32) {
         match sz {
             Size::B => bus.write8(addr, v as u8),
-            Size::W => bus.write16(addr, v as u16),
+            Size::W => self.write16(bus, addr, v as u16),
             Size::L => {
-                bus.write16(addr, (v >> 16) as u16);
-                bus.write16(addr.wrapping_add(2), v as u16);
+                self.write16(bus, addr, (v >> 16) as u16);
+                self.write16(bus, addr.wrapping_add(2), v as u16);
             }
         }
     }
 
     #[inline]
     fn fetch16<B: Bus>(&mut self, bus: &mut B) -> u16 {
+        if self.is_020() {
+            let v = bus.read16(self.pc);
+            self.pc = self.pc.wrapping_add(2);
+            return v;
+        }
         if !self.pq_valid || self.pq_addr != self.pc {
             // Control flow changed: refill the queue (two bus reads).
             self.pq_addr = self.pc;
@@ -283,7 +346,40 @@ impl Cpu {
         if ext & 0x0800 == 0 {
             idx = idx as i16 as i32 as u32;
         }
-        base.wrapping_add(idx).wrapping_add(ext as i8 as i32 as u32)
+        if !self.is_020() {
+            return base.wrapping_add(idx).wrapping_add(ext as i8 as i32 as u32);
+        }
+        idx <<= (ext >> 9) & 3;
+        if ext & 0x0100 == 0 {
+            return base.wrapping_add(idx).wrapping_add(ext as i8 as i32 as u32);
+        }
+        // 68020 full extension word: base/index suppress, base displacement,
+        // optional memory indirection with outer displacement.
+        let base = if ext & 0x80 != 0 { 0 } else { base };
+        let idx = if ext & 0x40 != 0 { 0 } else { idx };
+        let bd = match (ext >> 4) & 3 {
+            2 => self.fetch16(bus) as i16 as i32 as u32,
+            3 => self.fetch32(bus),
+            _ => 0,
+        };
+        let iis = ext & 7;
+        if iis == 0 {
+            return base.wrapping_add(bd).wrapping_add(idx);
+        }
+        let od = match iis & 3 {
+            2 => self.fetch16(bus) as i16 as i32 as u32,
+            3 => self.fetch32(bus),
+            _ => 0,
+        };
+        if iis & 4 == 0 {
+            // Pre-indexed: ([bd,base,index],od)
+            let p = self.read32(bus, base.wrapping_add(bd).wrapping_add(idx));
+            p.wrapping_add(od)
+        } else {
+            // Post-indexed: ([bd,base],index,od)
+            let p = self.read32(bus, base.wrapping_add(bd));
+            p.wrapping_add(idx).wrapping_add(od)
+        }
     }
 
     /// Decode an effective address. `mode`/`reg` are the 3-bit fields.
@@ -367,9 +463,21 @@ impl Cpu {
         self.set_supervisor(true);
         self.t = false;
         bus.idle(4);
+        if self.is_020() {
+            // Format 2 frames carry the address of the faulting instruction.
+            let format = match vector {
+                VEC_CHK | VEC_TRAPV | VEC_ZERO_DIVIDE | VEC_TRACE => 2,
+                _ => 0,
+            };
+            if format == 2 {
+                let ia = self.instr_pc;
+                self.push32(bus, ia);
+            }
+            self.push16(bus, (format << 12 | vector * 4) as u16);
+        }
         self.push32(bus, stacked_pc);
         self.push16(bus, old_sr);
-        self.pc = self.read32(bus, vector * 4);
+        self.pc = self.read32(bus, self.vbr.wrapping_add(vector * 4));
         self.exception_taken = true;
     }
 
@@ -381,10 +489,14 @@ impl Cpu {
         self.imask = level;
         // Interrupt acknowledge cycle and internal processing.
         bus.idle(24);
+        let vector = 24 + level as u32;
+        if self.is_020() {
+            self.push16(bus, (vector * 4) as u16);
+        }
         let pc = self.pc;
         self.push32(bus, pc);
         self.push16(bus, old_sr);
-        self.pc = self.read32(bus, (24 + level as u32) * 4);
+        self.pc = self.read32(bus, self.vbr.wrapping_add(vector * 4));
     }
 
     // ---- condition codes and flags ----------------------------------------

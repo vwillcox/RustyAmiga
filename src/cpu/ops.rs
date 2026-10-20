@@ -1,4 +1,4 @@
-//! 68000 instruction decode and execution.
+//! 68000 instruction decode and execution (68020 additions dispatch to ops020).
 
 use super::*;
 
@@ -54,6 +54,19 @@ impl Cpu {
             return self.bitop(bus, op, bit);
         }
         let kind = (op >> 9) & 7;
+        if self.is_020() {
+            if op & 0x00c0 == 0x00c0 {
+                return match kind {
+                    0..=2 => self.cmp2(bus, op),
+                    5..=7 if op & 0x3f == 0x3c && kind != 5 => self.cas2(bus, op),
+                    5..=7 => self.cas(bus, op),
+                    _ => self.illegal(bus),
+                };
+            }
+            if kind == 7 {
+                return self.moves(bus, op);
+            }
+        }
         // CCR / SR forms of ORI, ANDI, EORI.
         if op & 0x00ff == 0x003c && matches!(kind, 0 | 1 | 5) {
             let imm = self.fetch16(bus) as u8;
@@ -227,6 +240,41 @@ impl Cpu {
     fn line4<B: Bus>(&mut self, bus: &mut B, op: u16) {
         let mode = (op >> 3) & 7;
         let reg = op & 7;
+        if self.is_020() {
+            if op & 0xfff8 == 0x49c0 {
+                // EXTB.L
+                let r = reg as usize;
+                let v = self.d[r] as i8 as i32 as u32;
+                self.d[r] = v;
+                self.logic_flags(v, Size::L);
+                return;
+            }
+            if op & 0x01c0 == 0x0100 {
+                return self.chk_l(bus, op);
+            }
+            if op & 0xfff8 == 0x4808 {
+                // LINK.L
+                let r = reg as usize;
+                let disp = self.fetch32(bus);
+                let v = self.a[r];
+                self.push32(bus, v);
+                self.a[r] = self.a[7];
+                self.a[7] = self.a[7].wrapping_add(disp);
+                return;
+            }
+            match op & 0xffc0 {
+                0x4c00 => return self.mul_l(bus, op),
+                0x4c40 => return self.div_l(bus, op),
+                0x42c0 => {
+                    // MOVE from CCR
+                    let ea = self.ea(bus, mode, reg, Size::W);
+                    let ccr = self.ccr() as u32;
+                    return self.write_ea(bus, ea, Size::W, ccr);
+                }
+                0x40c0 if !self.s => return self.privilege_violation(bus),
+                _ => {}
+            }
+        }
         if op & 0x01c0 == 0x01c0 {
             // LEA
             let ea = self.ea(bus, mode, reg, Size::L);
@@ -288,7 +336,7 @@ impl Cpu {
                 // CLR (the 68000 performs a dummy read first)
                 let sz = Size::from_bits(op >> 6).unwrap();
                 let ea = self.ea(bus, mode, reg, sz);
-                if let Ea::M(_) = ea {
+                if matches!(ea, Ea::M(_)) && !self.is_020() {
                     let _ = self.read_ea(bus, ea, sz);
                 }
                 self.write_ea(bus, ea, sz, 0);
@@ -489,6 +537,19 @@ impl Cpu {
                 self.set_sr(v);
                 self.stopped = true;
             }
+            0x4e73 if self.is_020() => {
+                if !self.s {
+                    return self.privilege_violation(bus);
+                }
+                self.rte_020(bus);
+            }
+            0x4e74 if self.is_020() => {
+                // RTD
+                let disp = self.fetch16(bus) as i16 as i32 as u32;
+                self.pc = self.pop32(bus);
+                self.a[7] = self.a[7].wrapping_add(disp);
+            }
+            0x4e7a | 0x4e7b if self.is_020() => self.movec(bus, op & 1 != 0),
             0x4e73 => {
                 if !self.s {
                     return self.privilege_violation(bus);
@@ -586,7 +647,9 @@ impl Cpu {
             }
         }
         // The 68000 performs one extra word read past the end of the list.
-        let _ = bus.read16(addr);
+        if !self.is_020() {
+            let _ = bus.read16(addr);
+        }
         if mode == 3 {
             self.a[reg] = addr;
         }
@@ -599,6 +662,9 @@ impl Cpu {
         let reg = op & 7;
         if op & 0xc0 == 0xc0 {
             let cc = (op >> 8) & 15;
+            if mode == 7 && (2..=4).contains(&reg) && self.is_020() {
+                return self.trapcc(bus, op);
+            }
             if mode == 1 {
                 // DBcc
                 let disp = self.fetch16(bus) as i16 as i32 as u32;
@@ -654,9 +720,10 @@ impl Cpu {
     fn op_bcc<B: Bus>(&mut self, bus: &mut B, op: u16) {
         let base = self.pc;
         let mut disp = op as i8 as i32 as u32;
-        let word = disp == 0;
-        if word {
+        if disp == 0 {
             disp = self.fetch16(bus) as i16 as i32 as u32;
+        } else if disp == 0xffff_ffff && self.is_020() {
+            disp = self.fetch32(bus);
         }
         let target = base.wrapping_add(disp);
         let cc = (op >> 8) & 15;
@@ -685,6 +752,7 @@ impl Cpu {
         match (op >> 6) & 7 {
             3 => return self.divu(bus, op),
             7 => return self.divs(bus, op),
+            5 | 6 if mode <= 1 && self.is_020() => return self.pack(bus, op, (op >> 6) & 7 == 6),
             4 if mode <= 1 => {
                 // SBCD
                 if mode == 0 {
@@ -1026,6 +1094,9 @@ impl Cpu {
     // ---- line E: shifts and rotates ----------------------------------------
 
     fn linee<B: Bus>(&mut self, bus: &mut B, op: u16) {
+        if op & 0x08c0 == 0x08c0 && self.is_020() {
+            return self.bitfield(bus, op);
+        }
         if op & 0xc0 == 0xc0 {
             // Memory form: word, count 1. Kind in bits 10-9.
             let ea = self.ea(bus, (op >> 3) & 7, op & 7, Size::W);
