@@ -149,18 +149,18 @@ fn rom_dirs(args: &Args) -> Vec<PathBuf> {
     v
 }
 
-/// Locate an Amiga Forever shared hard disk such as `workbench-135.hdf`.
-fn find_shared_hdf(args: &Args, id: &str) -> Option<PathBuf> {
-    let name = format!("workbench-{id}.hdf");
-    let mut dirs = vec![PathBuf::from("hdf")];
+/// Locate an Amiga Forever shared file (`kind` is "hdf" or "adf"), such as
+/// `workbench-135.hdf`, in ./<kind> or next to the ROM directories.
+fn find_shared(args: &Args, kind: &str, name: &str) -> Option<PathBuf> {
+    let mut dirs = vec![PathBuf::from(kind)];
     for d in rom_dirs(args) {
-        dirs.push(d.join("../hdf"));
-        dirs.push(d.join("hdf"));
+        dirs.push(d.join("..").join(kind));
+        dirs.push(d.join(kind));
     }
     if let Some(home) = std::env::var_os("HOME") {
-        dirs.push(PathBuf::from(home).join(".config/amiga/hdf"));
+        dirs.push(PathBuf::from(home).join(".config/amiga").join(kind));
     }
-    dirs.into_iter().map(|d| d.join(&name)).find(|p| p.is_file())
+    dirs.into_iter().map(|d| d.join(name)).find(|p| p.is_file())
 }
 
 fn find_rom(args: &Args, candidates: &[&str]) -> PathBuf {
@@ -209,6 +209,13 @@ fn main() {
             log::info!("RP9: {} ({})", r.title, r.system);
             for (name, data) in &r.floppies {
                 floppies.push(frontend::SwapDisk { name: name.clone(), data: data.clone(), path: None });
+            }
+            if let (true, Some(id)) = (r.floppies.is_empty(), &r.boot_adf) {
+                let name = format!("amiga-os-{id}-workbench.adf");
+                let p = find_shared(&args, "adf", &name).unwrap_or_else(|| {
+                    die(format!("this title boots from {name}; put it in ./adf (from the Amiga Forever \"Shared/adf\" folder)"))
+                });
+                floppies.push(frontend::SwapDisk::from_path(&p).unwrap_or_else(|e| die(e)));
             }
             rp9 = Some(r);
         }
@@ -273,7 +280,7 @@ fn main() {
     let mut hdfs: Vec<(String, Vec<u8>, bool)> = vec![];
     if let Some(r) = &rp9 {
         if let Some(b) = &r.boot_hdf {
-            let p = find_shared_hdf(&args, b).unwrap_or_else(|| {
+            let p = find_shared(&args, "hdf", &format!("workbench-{b}.hdf")).unwrap_or_else(|| {
                 die(format!("this title boots from workbench-{b}.hdf; put it in ./hdf (from the Amiga Forever \"Shared/hdf\" folder)"))
             });
             let data = std::fs::read(&p).unwrap_or_else(|e| die(format!("{}: {e}", p.display())));

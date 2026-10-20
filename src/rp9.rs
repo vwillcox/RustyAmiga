@@ -30,6 +30,9 @@ pub struct Rp9 {
     /// Shared Amiga Forever system hard disk to boot from, e.g. "135" for
     /// `workbench-135.hdf`.
     pub boot_hdf: Option<String>,
+    /// Shared Amiga Forever Workbench floppy to boot from, e.g. "310" for
+    /// `amiga-os-310-workbench.adf`.
+    pub boot_adf: Option<String>,
 }
 
 impl Rp9 {
@@ -59,6 +62,10 @@ impl Rp9 {
             (_, Some(Model::A600)) => vec!["amiga-os-205-a600.rom", "amiga-os-310-a600.rom"],
             (Some(310), Some(Model::A1200)) => vec!["amiga-os-310-a1200.rom"],
             (Some(310), _) => vec!["amiga-os-310-a4000.rom", "amiga-os-310-a1200.rom"],
+            (_, Some(Model::A1200)) => vec!["amiga-os-310-a1200.rom"],
+            (_, Some(Model::A3000)) => vec!["amiga-os-310-a3000.rom"],
+            (_, Some(Model::A4000)) => vec!["amiga-os-310-a4000.rom"],
+            (_, Some(Model::Cd32)) => vec!["amiga-os-310-cd32.rom"],
             _ => vec!["amiga-os-130.rom"],
         }
     }
@@ -185,6 +192,10 @@ fn parse_manifest(xml: &str) -> Rp9 {
         .into_iter()
         .find(|(a, _)| attr(a, "type") == Some("hdf"))
         .map(|(_, t)| t.to_string());
+    rp.boot_adf = tag_text(xml, "boot")
+        .into_iter()
+        .find(|(a, _)| attr(a, "type") == Some("adf"))
+        .map(|(_, t)| t.to_string());
     rp
 }
 
@@ -223,7 +234,7 @@ impl Rp9 {
         if let Some(c) = &self.cpu {
             return Some(format!("needs a {c} CPU"));
         }
-        if self.floppy_names.is_empty() && self.harddrives.is_empty() && self.boot_hdf.is_none() {
+        if self.floppy_names.is_empty() && self.harddrives.is_empty() && self.boot_hdf.is_none() && self.boot_adf.is_none() {
             return Some("no floppy or hard disk media".into());
         }
         None
