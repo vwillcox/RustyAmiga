@@ -42,9 +42,12 @@ struct Args {
     /// Slow ("ranger"/trapdoor) RAM at $C00000 in KB.
     #[arg(long)]
     slow: Option<u32>,
-    /// Zorro II fast RAM in KB (autoconfig).
+    /// Fast RAM in KB: Zorro II (autoconfig), or motherboard RAM on the A3000/A4000.
     #[arg(long)]
     fast: Option<u32>,
+    /// Zorro III fast RAM in KB (A3000/A4000).
+    #[arg(long)]
+    z3: Option<u32>,
     #[arg(long)]
     ntsc: bool,
     /// Number of floppy drives (1-4).
@@ -246,7 +249,14 @@ fn main() {
     let mut cfg = Config::for_model(model);
     if let Some(r) = &rp9 {
         if r.fast_ram > 0 {
-            cfg.fast_kb = (r.fast_ram / 1024).min(8192);
+            if model.addr32() {
+                cfg.mb_kb = (r.fast_ram / 1024).min(16384);
+            } else {
+                cfg.fast_kb = (r.fast_ram / 1024).min(8192);
+            }
+        }
+        if r.z3_ram > 0 {
+            cfg.z3_kb = (r.z3_ram / 1024).min(1 << 20);
         }
         if r.slow_ram > 0 {
             cfg.slow_kb = r.slow_ram / 1024;
@@ -264,7 +274,14 @@ fn main() {
         cfg.slow_kb = s;
     }
     if let Some(f) = args.fast {
-        cfg.fast_kb = f;
+        if model.addr32() {
+            cfg.mb_kb = f.min(16384);
+        } else {
+            cfg.fast_kb = f;
+        }
+    }
+    if let Some(z) = args.z3 {
+        cfg.z3_kb = z;
     }
     cfg.ntsc = args.ntsc;
     cfg.turbo_floppy |= args.turbo_floppy;

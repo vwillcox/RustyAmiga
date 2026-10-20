@@ -9,6 +9,11 @@
 //! - $DA9000: interrupt change latch (write 0 bits to clear)
 //! - $DAA000: interrupt enable
 //! - $DE1000: Gayle ID, read one bit at a time in bit 7
+//!
+//! The A4000 has the same IDE interface without the rest of Gayle:
+//! - $DD2020: data; $DD2022 + 4n: task file register n
+//! - $DD303A: alternate status / device control
+//! - $DD3020: interrupt status (bit 7)
 
 const GAYLE_ID: u8 = 0xd0;
 const IRQ_IDE: u8 = 0x80;
@@ -91,6 +96,8 @@ enum Xfer {
 }
 
 pub struct Gayle {
+    /// A4000 IDE (no Gayle registers, different address decode).
+    pub a4000: bool,
     pub drives: [Option<AtaDrive>; 2],
     id_pos: u8,
     irq_latch: u8,
@@ -119,6 +126,7 @@ pub struct Gayle {
 impl Gayle {
     pub fn new() -> Gayle {
         Gayle {
+            a4000: false,
             drives: [None, None],
             id_pos: 0,
             irq_latch: 0,
@@ -140,15 +148,34 @@ impl Gayle {
         }
     }
 
+    pub fn new_a4000() -> Gayle {
+        Gayle { a4000: true, ..Gayle::new() }
+    }
+
     pub fn reset(&mut self) {
         let drives = std::mem::take(&mut self.drives);
+        let a4000 = self.a4000;
         *self = Gayle::new();
         self.drives = drives;
+        self.a4000 = a4000;
     }
 
     /// Interrupt line to Paula's INT2 (PORTS).
     pub fn irq(&self) -> bool {
+        if self.a4000 {
+            return self.intrq;
+        }
         self.irq_latch & self.int_enable & IRQ_IDE != 0
+    }
+
+    /// A4000 decode: Some(Ok(reg)) for a task file register, Some(Err(())) for
+    /// the alternate status/device control register.
+    fn a4000_reg(a: u32) -> Option<Result<u8, ()>> {
+        match a & 0xff_ffff {
+            0xdd_2020..=0xdd_203f => Some(Ok(((a - 0xdd_2020) >> 2) as u8 & 7)),
+            0xdd_3038..=0xdd_303b => Some(Err(())),
+            _ => None,
+        }
     }
 
     fn unit(&self) -> usize {
@@ -169,6 +196,20 @@ impl Gayle {
     // ---- bus interface ----------------------------------------------------------
 
     pub fn read8(&mut self, a: u32) -> u8 {
+        if self.a4000 {
+            return match Self::a4000_reg(a) {
+                Some(Ok(r)) => self.ide_read(r),
+                Some(Err(())) => self.alt_status(),
+                None if a & 0xff_fffc == 0xdd_3020 => {
+                    if self.intrq {
+                        IRQ_IDE
+                    } else {
+                        0
+                    }
+                }
+                None => 0xff,
+            };
+        }
         match a >> 16 & 0xff {
             0xda => match a & 0xf000 {
                 0x8000 => {
@@ -195,7 +236,10 @@ impl Gayle {
     }
 
     pub fn read16(&mut self, a: u32) -> u16 {
-        if a & 0xff_f000 == 0xda_2000 && (a >> 2) & 7 == 0 {
+        if self.a4000 && a & 0xff_fffc == 0xdd_2020 {
+            return self.data_read();
+        }
+        if !self.a4000 && a & 0xff_f000 == 0xda_2000 && (a >> 2) & 7 == 0 {
             return self.data_read();
         }
         let v = self.read8(a);
@@ -203,6 +247,14 @@ impl Gayle {
     }
 
     pub fn write8(&mut self, a: u32, v: u8) {
+        if self.a4000 {
+            match Self::a4000_reg(a) {
+                Some(Ok(r)) => self.ide_write(r, v),
+                Some(Err(())) => self.devctl_write(v),
+                None => {}
+            }
+            return;
+        }
         match a >> 16 & 0xff {
             0xda => match a & 0xf000 {
                 0x9000 => self.irq_latch &= v,
@@ -219,10 +271,14 @@ impl Gayle {
     }
 
     pub fn write16(&mut self, a: u32, v: u16) {
-        if a & 0xff_f000 == 0xda_2000 && (a >> 2) & 7 == 0 {
+        if self.a4000 && a & 0xff_fffc == 0xdd_2020 {
             return self.data_write(v);
         }
-        self.write8(a, (v >> 8) as u8);
+        if !self.a4000 && a & 0xff_f000 == 0xda_2000 && (a >> 2) & 7 == 0 {
+            return self.data_write(v);
+        }
+        // Byte registers sit on the low byte lane on the A4000, high on Gayle.
+        self.write8(a, if self.a4000 { v as u8 } else { (v >> 8) as u8 });
     }
 
     // ---- ATA registers ----------------------------------------------------------

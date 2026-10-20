@@ -46,6 +46,12 @@ pub struct Board {
     pub slow: Vec<u8>,
     pub fast: Vec<u8>,
     fast_base: Option<u32>,
+    /// A3000/A4000 motherboard fast RAM, ending at $08000000.
+    pub mb_ram: Vec<u8>,
+    /// Zorro III RAM board and its configured base.
+    pub z3_ram: Vec<u8>,
+    z3_base: Option<u32>,
+    z3_ac_done: bool,
     autoconfig_done: bool,
     /// A590/A2091 SCSI controller, if fitted (configured after the fast RAM).
     pub scsi: Option<A2091>,
@@ -168,9 +174,17 @@ impl Board {
             slow: vec![0; cfg.slow_kb as usize * 1024],
             fast: vec![0; cfg.fast_kb as usize * 1024],
             fast_base: None,
+            mb_ram: vec![0; cfg.mb_kb as usize * 1024],
+            z3_ram: vec![0; cfg.z3_kb as usize * 1024],
+            z3_base: None,
+            z3_ac_done: false,
             autoconfig_done: false,
             scsi: None,
-            gayle: matches!(cfg.model, crate::config::Model::A600 | crate::config::Model::A1200).then(crate::gayle::Gayle::new),
+            gayle: match cfg.model {
+                crate::config::Model::A600 | crate::config::Model::A1200 => Some(crate::gayle::Gayle::new()),
+                crate::config::Model::A4000 => Some(crate::gayle::Gayle::new_a4000()),
+                _ => None,
+            },
             scsi_ac_done: false,
             rom,
             rom_mask,
@@ -309,6 +323,8 @@ impl Board {
         self.fast_base = None;
         self.autoconfig_done = false;
         self.scsi_ac_done = false;
+        self.z3_base = None;
+        self.z3_ac_done = false;
         if let Some(s) = self.scsi.as_mut() {
             s.reset();
         }
@@ -1189,6 +1205,72 @@ impl Board {
         None
     }
 
+    /// Zorro III RAM board configuration registers, while unconfigured.
+    fn z3_autoconfig_regs(&self) -> Option<[u8; 16]> {
+        if self.z3_ram.is_empty() || self.z3_ac_done {
+            return None;
+        }
+        let mb = self.z3_ram.len() >> 20;
+        // Sizes of 16 MB and up use the extended size codes.
+        let (code, ext): (u8, u8) = match mb {
+            16 => (0, 0x20),
+            32 => (1, 0x20),
+            64 => (2, 0x20),
+            128 => (3, 0x20),
+            256 => (4, 0x20),
+            512 => (5, 0x20),
+            1024 => (6, 0x20),
+            8 => (0, 0),
+            4 => (7, 0),
+            2 => (6, 0),
+            _ => (5, 0),
+        };
+        Some([
+            0x80 | 0x20 | code, // er_Type: Zorro III, memory list
+            0x02,
+            0x80 | 0x10 | ext, // er_Flags: memory space, Zorro III, extended size
+            0x00,
+            0x07,
+            0xdb,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ])
+    }
+
+    /// Zorro III configuration space at $FF000000: each register's high
+    /// nibble is at `offset`, its low nibble at `offset + $100`.
+    fn z3_config_read(&self, addr: u32) -> u8 {
+        let Some(regs) = self.z3_autoconfig_regs() else {
+            return 0xff;
+        };
+        let off = (addr & 0xff) as usize;
+        let idx = off / 4;
+        let byte = if idx < 16 { regs[idx] } else { 0 };
+        let nib = if addr & 0x100 == 0 { byte >> 4 } else { byte & 15 };
+        // Registers $00 and $40 up are not inverted.
+        let nib = if idx == 0 || idx >= 16 { nib } else { !nib & 15 };
+        nib << 4 | 0x0f
+    }
+
+    fn z3_config_write(&mut self, addr: u32, v: u16, word: bool) {
+        if self.z3_autoconfig_regs().is_none() {
+            return;
+        }
+        match addr & 0xff {
+            // Expansion writes the base address bits A31-A16 as a word.
+            0x44 if word => {
+                self.z3_base = Some((v as u32) << 16);
+                self.z3_ac_done = true;
+                log::debug!("Zorro III RAM configured at {:08x}", (v as u32) << 16);
+            }
+            0x44 => self.z3_base = Some((self.z3_base.unwrap_or(0) & 0x00ff_0000) | (v as u32 & 0xff) << 24),
+            0x45 => self.z3_base = Some((self.z3_base.unwrap_or(0) & 0xff00_0000) | (v as u32 & 0xff) << 16),
+            // Zorro II-style low address byte: written before the $44 word.
+            0x48 => {}
+            0x4c => self.z3_ac_done = true,
+            _ => {}
+        }
+    }
+
     fn autoconfig_read(&self, addr: u32) -> u8 {
         let Some(regs) = self.autoconfig_regs() else {
             return 0xff;
@@ -1258,6 +1340,8 @@ impl Board {
             Region::Chip(o) => self.chip[o] = v,
             Region::Slow(o) => self.slow[o] = v,
             Region::Fast(o) => self.fast[o] = v,
+            Region::Mb(o) => self.mb_ram[o] = v,
+            Region::Z3(o) => self.z3_ram[o] = v,
             _ => {}
         }
     }
@@ -1267,6 +1351,8 @@ impl Board {
             Region::Chip(o) => self.chip[o],
             Region::Slow(o) => self.slow[o],
             Region::Fast(o) => self.fast[o],
+            Region::Mb(o) => self.mb_ram[o],
+            Region::Z3(o) => self.z3_ram[o],
             _ => 0,
         }
     }
@@ -1303,6 +1389,8 @@ impl Board {
             Region::Chip(o) => b(o, &self.chip),
             Region::Slow(o) => b(o, &self.slow),
             Region::Fast(o) => b(o, &self.fast),
+            Region::Mb(o) => b(o, &self.mb_ram),
+            Region::Z3(o) => b(o, &self.z3_ram),
             Region::Rom(o) => b(o, &self.rom),
             Region::ExtRom(o) => b(o, &self.ext_rom),
             Region::Scsi(o) if o >= 0x2000 => self.scsi.as_ref().unwrap().peek_rom16(o),
@@ -1326,12 +1414,18 @@ enum Region {
     Autoconfig,
     Scsi(u32),
     Gayle,
+    Z3Config,
+    Mb(usize),
+    Z3(usize),
     None,
 }
 
 impl Board {
     #[inline]
     fn region(&self, a: u32, write: bool) -> Region {
+        if a >> 24 != 0 && self.cfg.model.addr32() {
+            return self.region32(a);
+        }
         let a = a & 0xff_ffff;
         match a >> 16 {
             0x00..=0x1f => {
@@ -1359,7 +1453,8 @@ impl Board {
                 }
             }
             0xdf => Region::Custom,
-            0xd8..=0xdb | 0xde if self.gayle.is_some() => Region::Gayle,
+            0xd8..=0xdb | 0xde if self.gayle.as_ref().is_some_and(|g| !g.a4000) => Region::Gayle,
+            0xdd if self.gayle.as_ref().is_some_and(|g| g.a4000) => Region::Gayle,
             0xe8 => Region::Autoconfig,
             0xe9..=0xef if self.scsi.as_ref().and_then(|s| s.contains(a)).is_some() => {
                 Region::Scsi(self.scsi.as_ref().unwrap().contains(a).unwrap())
@@ -1367,8 +1462,33 @@ impl Board {
             0xf8..=0xff => Region::Rom((a & self.rom_mask) as usize),
             0xe0..=0xe7 if !self.ext_rom.is_empty() => Region::ExtRom((a as usize - 0xe0_0000) % self.ext_rom.len()),
             0xe0..=0xe7 if self.rom.len() > 0x80000 => Region::Rom((a & self.rom_mask) as usize),
-            _ => Region::None,
+            _ => {
+                if std::env::var_os("AMIGA_LOG_UNMAPPED").is_some() {
+                    eprintln!("unmapped {} {a:06x} pc={:06x}", if write { "W" } else { "R" }, self.cur_pc);
+                }
+                Region::None
+            }
         }
+    }
+}
+
+impl Board {
+    /// Addresses above 16 MB on 32-bit machines.
+    fn region32(&self, a: u32) -> Region {
+        let mb_start = 0x0800_0000 - self.mb_ram.len() as u32;
+        if (mb_start..0x0800_0000).contains(&a) {
+            return Region::Mb((a - mb_start) as usize);
+        }
+        if let Some(b) = self.z3_base.filter(|_| self.z3_ac_done) {
+            let off = a.wrapping_sub(b) as usize;
+            if off < self.z3_ram.len() {
+                return Region::Z3(off);
+            }
+        }
+        if a >> 24 == 0xff {
+            return Region::Z3Config;
+        }
+        Region::None
     }
 }
 
@@ -1386,6 +1506,18 @@ impl Bus for Board {
             Region::Fast(o) => {
                 self.cycles += 4;
                 self.fast[o]
+            }
+            Region::Mb(o) => {
+                self.cycles += 4;
+                self.mb_ram[o]
+            }
+            Region::Z3(o) => {
+                self.cycles += 4;
+                self.z3_ram[o]
+            }
+            Region::Z3Config => {
+                self.cycles += 4;
+                self.z3_config_read(addr)
             }
             Region::Rom(o) => {
                 self.cycles += 4;
@@ -1455,6 +1587,18 @@ impl Bus for Board {
                 self.cycles += 4;
                 (self.fast[o] as u16) << 8 | self.fast[o + 1] as u16
             }
+            Region::Mb(o) => {
+                self.cycles += 4;
+                (self.mb_ram[o] as u16) << 8 | self.mb_ram[o + 1] as u16
+            }
+            Region::Z3(o) => {
+                self.cycles += 4;
+                (self.z3_ram[o] as u16) << 8 | self.z3_ram[o + 1] as u16
+            }
+            Region::Z3Config => {
+                self.cycles += 4;
+                (self.z3_config_read(addr) as u16) << 8 | 0xff
+            }
             Region::Rom(o) => {
                 self.cycles += 4;
                 (self.rom[o] as u16) << 8 | self.rom[o + 1] as u16
@@ -1512,6 +1656,18 @@ impl Bus for Board {
                 self.cycles += 4;
                 self.fast[o] = v;
             }
+            Region::Mb(o) => {
+                self.cycles += 4;
+                self.mb_ram[o] = v;
+            }
+            Region::Z3(o) => {
+                self.cycles += 4;
+                self.z3_ram[o] = v;
+            }
+            Region::Z3Config => {
+                self.cycles += 4;
+                self.z3_config_write(addr, v as u16, false);
+            }
             Region::Custom => {
                 self.chip_access();
                 // The 68000 puts the byte on both halves of the data bus.
@@ -1559,6 +1715,20 @@ impl Bus for Board {
                 self.cycles += 4;
                 self.fast[o] = (v >> 8) as u8;
                 self.fast[o + 1] = v as u8;
+            }
+            Region::Mb(o) => {
+                self.cycles += 4;
+                self.mb_ram[o] = (v >> 8) as u8;
+                self.mb_ram[o + 1] = v as u8;
+            }
+            Region::Z3(o) => {
+                self.cycles += 4;
+                self.z3_ram[o] = (v >> 8) as u8;
+                self.z3_ram[o + 1] = v as u8;
+            }
+            Region::Z3Config => {
+                self.cycles += 4;
+                self.z3_config_write(addr, v, true);
             }
             Region::Custom => {
                 self.chip_access();

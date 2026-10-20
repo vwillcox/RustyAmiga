@@ -38,7 +38,12 @@ impl Model {
     }
 
     pub fn supported(self) -> bool {
-        matches!(self, Model::A500 | Model::A1000 | Model::A2000 | Model::A500Plus | Model::A600 | Model::A1200)
+        matches!(self, Model::A500 | Model::A1000 | Model::A2000 | Model::A500Plus | Model::A600 | Model::A1200 | Model::A4000)
+    }
+
+    /// Machines with a 32-bit address bus (A3000/A4000).
+    pub fn addr32(self) -> bool {
+        matches!(self, Model::A3000 | Model::A4000)
     }
 
     pub fn cpu(self) -> crate::cpu::CpuModel {
@@ -55,6 +60,10 @@ pub struct Config {
     pub chip_kb: u32,
     pub slow_kb: u32,
     pub fast_kb: u32,
+    /// A3000/A4000 motherboard fast RAM (ends at $08000000).
+    pub mb_kb: u32,
+    /// Zorro III fast RAM (A3000/A4000).
+    pub z3_kb: u32,
     pub ntsc: bool,
     pub turbo_floppy: bool,
     pub drives: usize,
@@ -73,6 +82,8 @@ impl Config {
             chip_kb,
             slow_kb,
             fast_kb: 0,
+            mb_kb: if model.addr32() { 4096 } else { 0 },
+            z3_kb: 0,
             ntsc: false,
             turbo_floppy: false,
             drives: 1,

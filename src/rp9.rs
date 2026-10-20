@@ -16,6 +16,7 @@ pub struct Rp9 {
     pub system: String,
     pub system_rom: Option<u32>,
     pub fast_ram: u32,
+    pub z3_ram: u32,
     pub slow_ram: u32,
     pub chip_ram: u32,
     pub turbo_floppy: bool,
@@ -150,6 +151,7 @@ fn parse_manifest(xml: &str) -> Rp9 {
         let bytes: u32 = text.parse().unwrap_or(0);
         match attr(attrs, "type") {
             Some("fast") => rp.fast_ram = bytes,
+            Some("z3") => rp.z3_ram = bytes,
             Some("slow") => rp.slow_ram = bytes,
             Some("chip") => rp.chip_ram = bytes,
             _ => {}
