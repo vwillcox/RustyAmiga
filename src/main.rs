@@ -300,9 +300,14 @@ fn main() {
             die(format!("{}: expected a 16 KB A590/A2091 boot ROM", rom_path.display()));
         }
         let mut ctl = amiga::a2091::A2091::new(rom);
+        let n = hdfs.len();
         for (i, (name, data, ro)) in hdfs.into_iter().enumerate() {
             log::info!("SCSI unit {i}: {name} ({} KB)", data.len() / 1024);
-            ctl.disks[i] = Some(amiga::a2091::HardDisk::new(name, data, ro));
+            let mut disk = amiga::a2091::HardDisk::new(name, data, ro);
+            if i + 1 < n {
+                disk.clear_rdb_last_flags();
+            }
+            ctl.disks[i] = Some(disk);
         }
         amiga.board.scsi = Some(ctl);
     }

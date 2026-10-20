@@ -172,8 +172,11 @@ fn parse_manifest(xml: &str) -> Rp9 {
         .collect();
     floppies.sort_by_key(|f| f.0);
     rp.floppy_names = floppies.into_iter().map(|(_, n)| n).collect();
+    // Entries without a file name are host folders shared into the Amiga
+    // (e.g. root="shared"), which are not supported.
     let mut hds: Vec<(u32, String)> = tag_text(xml, "harddrive")
         .into_iter()
+        .filter(|(_, t)| !t.is_empty())
         .map(|(a, t)| (attr(a, "priority").and_then(|p| p.parse().ok()).unwrap_or(99), t.to_string()))
         .collect();
     hds.sort_by_key(|h| h.0);
