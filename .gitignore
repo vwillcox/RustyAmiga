@@ -1,0 +1,8 @@
+/target
+/roms
+*.msi
+*.adf
+/disks
+*.zip
+*.iso
+/titles
