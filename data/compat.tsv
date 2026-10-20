@@ -7,7 +7,7 @@ Amiga 500 (Commodore-Amiga, 1987, Amiga)	ok	title screen reached (automated)
 Amiga 4000 PPC (Commodore-Amiga & Phase 5, 1997, Amiga)	unsupported	needs a PowerPC accelerator
 Amiga 4000 Enhanced 3.X (Commodore-Amiga & Cloanto, 1997, Amiga)	unsupported	its main drive is an Amiga Forever host folder (not supported)
 Amiga 4000 (Commodore-Amiga, 1992, Amiga)	ok	boots Workbench 3.1
-Amiga 3000 (Commodore-Amiga, 1990, Amiga)	unsupported	not supported yet (68020+/AGA is a later milestone)
+Amiga 3000 (Commodore-Amiga, 1990, Amiga)	ok	boots Workbench 3.1 from the built-in SCSI
 Amiga 2000 Enhanced 1.3 (Commodore-Amiga & Cloanto, 1997, Amiga)	ok	hard disk (A590): boots Workbench; the "Shared" host folder is not supported
 Amiga 2000 (Commodore-Amiga, 1987, Amiga)	ok	title screen reached (automated)
 Amiga 1200 (Commodore-Amiga, 1992, Amiga)	ok	boots Workbench 3.1

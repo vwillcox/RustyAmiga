@@ -252,6 +252,9 @@ struct SatJob {
 }
 
 pub struct A2091 {
+    /// A3000 built-in SCSI: the SDMAC at $DD0000 (no autoconfig, no boot ROM;
+    /// Kickstart's scsi.device drives it).
+    pub a3000: bool,
     /// Counts SCSI commands (for the activity LED).
     pub activity: u64,
     rom: Vec<u8>,
@@ -282,6 +285,7 @@ pub struct A2091 {
 impl A2091 {
     pub fn new(rom: Vec<u8>) -> A2091 {
         A2091 {
+            a3000: false,
             activity: 0,
             rom,
             base: None,
@@ -305,10 +309,41 @@ impl A2091 {
     pub fn reset(&mut self) {
         let rom = std::mem::take(&mut self.rom);
         let disks = std::mem::take(&mut self.disks);
-        let activity = self.activity;
+        let (activity, a3000, base) = (self.activity, self.a3000, self.base);
         *self = A2091::new(rom);
         self.disks = disks;
         self.activity = activity;
+        self.a3000 = a3000;
+        if a3000 {
+            self.base = base;
+        }
+    }
+
+    pub fn new_a3000() -> A2091 {
+        A2091 { a3000: true, base: Some(0xdd_0000), ..A2091::new(vec![]) }
+    }
+
+    /// Translate an A3000 SDMAC register offset to the equivalent A2091 DMAC one.
+    fn sdmac_offset(off: u32) -> u32 {
+        match off & 0xff {
+            0x02 | 0x03 => 0x8e, // DAWR
+            0x04 | 0x05 => 0x80, // WTC
+            0x06 | 0x07 => 0x82,
+            0x08..=0x0b => 0x42 | (off & 1), // CNTR
+            0x0c | 0x0d => 0x84, // ACR
+            0x0e | 0x0f => 0x86,
+            0x10..=0x13 => 0xe0, // ST_DMA
+            0x14..=0x17 => 0xe8, // FLUSH
+            0x18..=0x1b => 0xe4, // CINT
+            0x1c..=0x1f => 0x40 | (off & 1), // ISTR
+            0x3c..=0x3f => 0xe2, // SP_DMA
+            0x40 | 0x41 | 0x48 | 0x49 => 0x90 | (off & 1), // SASR (also at $48)
+            0x42 | 0x43 => 0x92 | (off & 1), // SCMD
+            o => {
+                log::trace!("sdmac: unknown register {o:02x}");
+                0xfe
+            }
+        }
     }
 
     /// Autoconfig ROM contents (not inverted).
@@ -353,22 +388,71 @@ impl A2091 {
         (self.rom[o] as u16) << 8 | self.rom[o + 1] as u16
     }
 
-    // ---- DMAC registers -------------------------------------------------------
+    // ---- bus interface (A3000 offsets are translated to the A2091 layout) -------
+
+    fn map(&self, off: u32) -> u32 {
+        if self.a3000 {
+            Self::sdmac_offset(off)
+        } else {
+            off
+        }
+    }
+
+    // The SDMAC's CNTR bits sit two places lower than the DMAC's (INTEN is bit 2).
+    fn is_sdmac_cntr(&self, off: u32) -> bool {
+        self.a3000 && off & 0xfe == 0x42
+    }
 
     pub fn read8(&mut self, off: u32, now: u64) -> u8 {
-        if off >= ROM_OFFSET {
+        let off = self.map(off);
+        if self.is_sdmac_cntr(off) {
+            return (self.cntr >> 2) as u8;
+        }
+        self.read8_dmac(off, now)
+    }
+
+    pub fn read16(&mut self, off: u32, now: u64) -> u16 {
+        let off = self.map(off);
+        if self.is_sdmac_cntr(off) {
+            return self.cntr >> 2;
+        }
+        self.read16_dmac(off, now)
+    }
+
+    pub fn write8(&mut self, off: u32, v: u8, now: u64) {
+        let off = self.map(off);
+        if self.is_sdmac_cntr(off) {
+            self.cntr = (v as u16 & 0x3f) << 2;
+            return;
+        }
+        self.write8_dmac(off, v, now)
+    }
+
+    pub fn write16(&mut self, off: u32, v: u16, now: u64) {
+        let off = self.map(off);
+        if self.is_sdmac_cntr(off) {
+            self.cntr = (v & 0x3f) << 2;
+            return;
+        }
+        self.write16_dmac(off, v, now)
+    }
+
+    // ---- DMAC registers -------------------------------------------------------
+
+    fn read8_dmac(&mut self, off: u32, now: u64) -> u8 {
+        if off >= ROM_OFFSET && !self.rom.is_empty() {
             return self.rom[(off as usize) & (self.rom.len() - 1)];
         }
         match off & 0xff {
             0x91 => self.asr,
             0x93 => self.read_wd(now),
-            o if o & 1 == 0 => (self.read16(off, now) >> 8) as u8,
-            _ => self.read16(off & !1, now) as u8,
+            o if o & 1 == 0 => (self.read16_dmac(off, now) >> 8) as u8,
+            _ => self.read16_dmac(off & !1, now) as u8,
         }
     }
 
-    pub fn read16(&mut self, off: u32, now: u64) -> u16 {
-        if off >= ROM_OFFSET {
+    fn read16_dmac(&mut self, off: u32, now: u64) -> u16 {
+        if off >= ROM_OFFSET && !self.rom.is_empty() {
             let o = (off as usize) & (self.rom.len() - 1);
             return (self.rom[o] as u16) << 8 | self.rom[o + 1] as u16;
         }
@@ -396,16 +480,16 @@ impl A2091 {
         }
     }
 
-    pub fn write8(&mut self, off: u32, v: u8, now: u64) {
+    fn write8_dmac(&mut self, off: u32, v: u8, now: u64) {
         match off & 0xff {
             0x91 => self.sasr = v as usize & 0x1f,
             0x93 => self.write_wd(v, now),
-            o if o & 1 == 0 => self.write16(off, (v as u16) << 8 | v as u16, now),
-            _ => self.write16(off & !1, v as u16, now),
+            o if o & 1 == 0 => self.write16_dmac(off, (v as u16) << 8 | v as u16, now),
+            _ => self.write16_dmac(off & !1, v as u16, now),
         }
     }
 
-    pub fn write16(&mut self, off: u32, v: u16, now: u64) {
+    fn write16_dmac(&mut self, off: u32, v: u16, now: u64) {
         match off & 0xfe {
             0x42 => self.cntr = v,
             0x84 => self.acr = (self.acr & 0xffff) | (v as u32) << 16,
@@ -562,7 +646,7 @@ impl A2091 {
 
     fn select(&mut self, atn: bool) {
         let target = (self.regs[WD_DEST_ID] & 7) as usize;
-        if self.disks[target].is_none() {
+        if self.disks.get(target).is_none_or(|d| d.is_none()) {
             self.finish(0x42);
             return;
         }
@@ -821,7 +905,7 @@ impl A2091 {
 
     fn sat_run(&mut self) -> Option<Dma> {
         let j = self.sat.as_ref().unwrap();
-        if self.disks[j.target].is_none() {
+        if self.disks.get(j.target).is_none_or(|d| d.is_none()) {
             self.sat = None;
             self.regs[WD_COMMAND_PHASE] = 0;
             self.finish(0x42);

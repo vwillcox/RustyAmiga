@@ -196,7 +196,7 @@ impl Board {
             z3_base: None,
             z3_ac_done: false,
             autoconfig_done: false,
-            scsi: None,
+            scsi: (cfg.model == crate::config::Model::A3000).then(A2091::new_a3000),
             gayle: match cfg.model {
                 crate::config::Model::A600 | crate::config::Model::A1200 => Some(crate::gayle::Gayle::new()),
                 crate::config::Model::A4000 => Some(crate::gayle::Gayle::new_a4000()),
@@ -1256,7 +1256,7 @@ impl Board {
                 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             ]);
         }
-        if self.scsi.is_some() && !self.scsi_ac_done {
+        if self.scsi.as_ref().is_some_and(|s| !s.a3000) && !self.scsi_ac_done {
             return Some(A2091::autoconfig_regs());
         }
         None
@@ -1371,7 +1371,7 @@ impl Board {
                 0x4c => self.autoconfig_done = true,
                 _ => {}
             }
-        } else if let Some(s) = self.scsi.as_mut().filter(|_| !self.scsi_ac_done) {
+        } else if let Some(s) = self.scsi.as_mut().filter(|s| !self.scsi_ac_done && !s.a3000) {
             match addr & 0xff {
                 0x48 => {
                     s.base = Some((v as u32 >> 4) << 20 | (s.base.unwrap_or(0) & 0x0f_0000));
@@ -1531,6 +1531,7 @@ impl Board {
             0xdd if self.gayle.as_ref().is_some_and(|g| g.a4000) => Region::Gayle,
             0xde if self.cfg.model.addr32() => Region::Ramsey,
             0xe8 => Region::Autoconfig,
+            0xdd if self.scsi.as_ref().is_some_and(|s| s.a3000) => Region::Scsi(a & 0xffff),
             0xe9..=0xef if self.scsi.as_ref().and_then(|s| s.contains(a)).is_some() => {
                 Region::Scsi(self.scsi.as_ref().unwrap().contains(a).unwrap())
             }

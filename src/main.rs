@@ -416,12 +416,18 @@ fn main() {
         if hdfs.len() > 7 {
             die("at most 7 hard disks are supported");
         }
-        let rom_path = args.scsi_rom.clone().unwrap_or_else(|| find_rom(&args, &["amiga-boot-a590.rom"]));
-        let rom = amiga::rom::load_raw(&rom_path, args.rom_key.as_deref()).unwrap_or_else(|e| die(e));
-        if rom.len() != 0x4000 {
-            die(format!("{}: expected a 16 KB A590/A2091 boot ROM", rom_path.display()));
-        }
-        let mut ctl = amiga::a2091::A2091::new(rom);
+        // The A3000's own SCSI controller is already fitted; elsewhere add an A590/A2091.
+        let mut ctl = match amiga.board.scsi.take() {
+            Some(c) => c,
+            None => {
+                let rom_path = args.scsi_rom.clone().unwrap_or_else(|| find_rom(&args, &["amiga-boot-a590.rom"]));
+                let rom = amiga::rom::load_raw(&rom_path, args.rom_key.as_deref()).unwrap_or_else(|e| die(e));
+                if rom.len() != 0x4000 {
+                    die(format!("{}: expected a 16 KB A590/A2091 boot ROM", rom_path.display()));
+                }
+                amiga::a2091::A2091::new(rom)
+            }
+        };
         for (i, (name, data, ro)) in hdfs.into_iter().enumerate() {
             log::info!("SCSI unit {i}: {name} ({} KB)", data.len() / 1024);
             ctl.disks[i] = Some(amiga::a2091::HardDisk::new(name, data, ro));

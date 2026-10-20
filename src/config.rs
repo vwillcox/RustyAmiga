@@ -38,7 +38,7 @@ impl Model {
     }
 
     pub fn supported(self) -> bool {
-        matches!(self, Model::A500 | Model::A1000 | Model::A2000 | Model::A500Plus | Model::A600 | Model::A1200 | Model::A4000)
+        matches!(self, Model::A500 | Model::A1000 | Model::A2000 | Model::A500Plus | Model::A600 | Model::A1200 | Model::A3000 | Model::A4000)
     }
 
     /// Machines with a 32-bit address bus (A3000/A4000).
