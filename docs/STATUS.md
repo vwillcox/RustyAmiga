@@ -38,6 +38,23 @@ The A590/A2091 controller is emulated at the hardware level and driven by Commod
 - Amiga Forever's boot disks set the RDB "last disk" flags. The real driver honours them and would stop scanning after unit 0, so they are cleared in memory on every disk except the last one, as HDToolBox would do.
 - All 19 Kickstart 1.3 hard disk titles (A2000/A500+) run. The other 83 hard disk titles need 68020+/AGA.
 
+## 68020-68040, FPU, AGA, A1200 and A4000 (2026-10-20)
+
+- CPUs: 68020, 68030 (MMU registers only) and 68040 (MOVEC MMU/TT registers, MOVE16, CINV/CPUSH; no translation). FPU: 68881/68882/68040, computed in f64. Unit tests are in `tests/cpu020.rs`.
+- The `--cpu-speed` multiplier scales non-chip-bus CPU time. Defaults: A1200 2x, A4000 4x, RP9 `speed="max"` 8x.
+- AGA (Lisa/Alice): 24-bit palette with bank select and LOCT, 8 planes, HAM8, BPLCON4, FMODE 1x/2x/4x, wide sprites.
+- A1200: Gayle IDE. A4000: 32-bit address space, motherboard and Zorro III RAM, A4000 IDE, Ramsey.
+- Amiga Forever's bare-partition application HDFs get an RDB synthesized in memory (`src/hdf.rs`).
+- Shared boot media come from the AF DVD: `./hdf/workbench-*.hdf` and `./adf/amiga-os-*-workbench.adf`.
+- The SingleStepTests data lives in `./sst` (gitignored). Run it with `SST_DIR=sst/v1 cargo test --release --test sst -- --nocapture`. STOP fails 1230 cases, which was already the case before this work.
+
+### Open items found in this session
+- **Tulou/Traktor 68060 demos exit silently on the 68040** (Carbon, The Chronicles, Fleetwood and others). There are no exceptions; the next lead is what they check (AttnFlags after 68040.library, PCR?).
+- **Some A4000 demos only reach their precalc or loading screens within 90 s** (Incision, Multiverse, The Castle, Lapsuus). They probably need more CPU speed or a longer test.
+- **No picture yet:** AmiBee, Overdose, Aerial Racers and My House (AGA floppies); Back to Planet Earth, Captured Dreams, Sumea, HOG and Neo 2 (A1200 HDFs); Concrete, Psyleflesk and Tour de Scene (A4000).
+- **HD floppy drives are not emulated** (Christmas Breakdown).
+- **The A4000 batch results are not yet recorded in data/compat.tsv.** About 40 of 57 titles show content; see the a4k batch.
+
 ## Known issues and open items
 
 - **Powerball works (not a regression).** Its intro sequence includes black gaps, and the menu only appears at about frame 7000 (140 s), or frame 5750 with turbo floppy. The 90 s single-frame check landed on a black gap.
@@ -56,5 +73,5 @@ The A590/A2091 controller is emulated at the hardware level and driven by Commod
 
 ## Next milestones
 
-1. 68020 CPU and the AGA chipset (A1200 first): this unlocks 20 floppy titles and 83 hard disk titles.
-2. Gayle IDE (A600/A1200) for hard disks under Kickstart 2.x/3.x, alongside the A590.
+1. Record the A4000 results in compat.tsv and investigate the 68060-demo exits.
+2. HD floppies; the remaining blank AGA titles.
