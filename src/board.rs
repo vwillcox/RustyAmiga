@@ -988,7 +988,7 @@ impl Board {
             0x07c => match self.cfg.model.chipset() {
                 Chipset::Ocs => 0xffff,
                 Chipset::Ecs => 0xfffc,
-                Chipset::Aga => 0xfff8,
+                Chipset::Aga => 0x00f8,
             },
             _ => 0xffff,
         }

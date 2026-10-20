@@ -249,7 +249,11 @@ fn main() {
     let rom_path = match &args.rom {
         Some(p) => p.clone(),
         None => {
-            let cands = rp9.as_ref().map(|r| r.rom_candidates()).unwrap_or_else(|| default_roms(model));
+            // An explicit --model overrides the package's machine (and so its ROM).
+            let cands = match &rp9 {
+                Some(r) if args.model.is_none() || r.model() == Some(model) => r.rom_candidates(),
+                _ => default_roms(model),
+            };
             find_rom(&args, &cands)
         }
     };
@@ -266,7 +270,12 @@ fn main() {
             }
         }
         if r.z3_ram > 0 {
-            cfg.z3_kb = (r.z3_ram / 1024).min(1 << 20);
+            if model.addr32() {
+                cfg.z3_kb = (r.z3_ram / 1024).min(1 << 20);
+            } else {
+                // No Zorro III on a 24-bit machine: give it Zorro II RAM instead.
+                cfg.fast_kb = cfg.fast_kb.max((r.z3_ram / 1024).min(8192));
+            }
         }
         if r.slow_ram > 0 {
             cfg.slow_kb = r.slow_ram / 1024;
@@ -502,6 +511,16 @@ fn main() {
                 eprintln!("recent PCs (unique, {}): {:06x?}", uniq.len(), &uniq[..uniq.len().min(64)]);
                 let tail: Vec<u32> = h.iter().rev().take(24).rev().copied().collect();
                 eprintln!("last PCs: {:06x?}", tail);
+            }
+            if let Some((addr, len)) = std::env::var("DUMP_MEM").ok().and_then(|v| {
+                let (a, l) = v.split_once(':')?;
+                Some((u32::from_str_radix(a, 16).ok()?, l.parse::<u32>().ok()?))
+            }) {
+                for row in (0..len).step_by(16) {
+                    let words: Vec<String> =
+                        (0..8).map(|i| format!("{:04x}", amiga.board.peek16(addr + row + i * 2))).collect();
+                    eprintln!("mem {:08x}: {}", addr + row, words.join(" "));
+                }
             }
             let start = std::env::var("DISASM_AT").ok().and_then(|v| u32::from_str_radix(&v, 16).ok()).unwrap_or(amiga.cpu.pc);
             let n = std::env::var("DISASM_N").ok().and_then(|v| v.parse().ok()).unwrap_or(16);
