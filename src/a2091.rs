@@ -52,30 +52,6 @@ impl HardDisk {
         HardDisk { name, data, read_only, sense: (0, 0) }
     }
 
-    /// Clear the RDB's "no more disks after this one" flags (RDBFF_LAST,
-    /// RDBFF_LASTLUN, RDBFF_LASTTID), as HDToolBox would, so the driver goes on to
-    /// scan later SCSI IDs. Only the in-memory copy changes.
-    pub fn clear_rdb_last_flags(&mut self) {
-        for blk in 0..16 {
-            let o = blk * 512;
-            if self.data.len() < o + 512 || &self.data[o..o + 4] != b"RDSK" {
-                continue;
-            }
-            let rd = |d: &[u8], i: usize| u32::from_be_bytes(d[i..i + 4].try_into().unwrap());
-            let flags = rd(&self.data, o + 20);
-            if flags & 7 == 0 {
-                return;
-            }
-            self.data[o + 20..o + 24].copy_from_slice(&(flags & !7).to_be_bytes());
-            let longs = (rd(&self.data, o + 4) as usize).min(128);
-            self.data[o + 8..o + 12].fill(0);
-            let sum = (0..longs).fold(0u32, |s, i| s.wrapping_add(rd(&self.data, o + i * 4)));
-            self.data[o + 8..o + 12].copy_from_slice(&sum.wrapping_neg().to_be_bytes());
-            log::info!("{}: cleared RDB last-disk flags ({flags:#x}) so later units are scanned", self.name);
-            return;
-        }
-    }
-
     fn blocks(&self) -> u32 {
         (self.data.len() / 512) as u32
     }

@@ -296,21 +296,29 @@ fn main() {
         hdfs.push((p.display().to_string(), data, false));
     }
 
+    // Make every image mountable by Commodore's drivers: bare partitions get an
+    // RDB, and all but the last disk let the driver scan on to later units.
+    let n_hdfs = hdfs.len();
+    for (i, (name, data, _)) in hdfs.iter_mut().enumerate() {
+        let d = std::mem::take(data);
+        *data = amiga::hdf::wrap_partition(d, &format!("DH{i}"), i == 0, if i == 0 { 0 } else { -1 });
+        if i + 1 < n_hdfs {
+            if let Some(f) = amiga::hdf::clear_last_flags(data) {
+                log::info!("{name}: cleared RDB last-disk flags ({f:#x}) so later units are scanned");
+            }
+        }
+    }
+
     let mut amiga = Amiga::new(cfg, rom.data);
     if !hdfs.is_empty() && amiga.board.gayle.is_some() {
         // A600/A1200: the internal IDE port takes a master and a slave.
         if hdfs.len() > 2 {
             die("the A600/A1200 IDE port takes at most 2 hard disks");
         }
-        let n = hdfs.len();
         let g = amiga.board.gayle.as_mut().unwrap();
         for (i, (name, data, _ro)) in hdfs.into_iter().enumerate() {
             log::info!("IDE {}: {name} ({} KB)", if i == 0 { "master" } else { "slave" }, data.len() / 1024);
-            let mut d = amiga::a2091::HardDisk::new(name.clone(), data, false);
-            if i + 1 < n {
-                d.clear_rdb_last_flags();
-            }
-            g.drives[i] = Some(amiga::gayle::AtaDrive::new(name, d.data));
+            g.drives[i] = Some(amiga::gayle::AtaDrive::new(name, data));
         }
     } else if !hdfs.is_empty() {
         if hdfs.len() > 7 {
@@ -322,14 +330,9 @@ fn main() {
             die(format!("{}: expected a 16 KB A590/A2091 boot ROM", rom_path.display()));
         }
         let mut ctl = amiga::a2091::A2091::new(rom);
-        let n = hdfs.len();
         for (i, (name, data, ro)) in hdfs.into_iter().enumerate() {
             log::info!("SCSI unit {i}: {name} ({} KB)", data.len() / 1024);
-            let mut disk = amiga::a2091::HardDisk::new(name, data, ro);
-            if i + 1 < n {
-                disk.clear_rdb_last_flags();
-            }
-            ctl.disks[i] = Some(disk);
+            ctl.disks[i] = Some(amiga::a2091::HardDisk::new(name, data, ro));
         }
         amiga.board.scsi = Some(ctl);
     }
