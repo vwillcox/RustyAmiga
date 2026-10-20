@@ -83,6 +83,13 @@ struct Args {
     /// Write-protect inserted disks.
     #[arg(long)]
     write_protect: bool,
+    /// Hard disk images (HDF) on an A590/A2091 SCSI controller, SCSI IDs 0.. in
+    /// order. Writes stay in memory and are not saved back.
+    #[arg(long = "hdf")]
+    hdf: Vec<PathBuf>,
+    /// Boot ROM for the SCSI controller (default: amiga-boot-a590.rom in --rom-dir).
+    #[arg(long)]
+    scsi_rom: Option<PathBuf>,
 }
 
 fn write_wav(path: &PathBuf, samples: &[f32], rate: u32) -> std::io::Result<()> {
@@ -142,6 +149,20 @@ fn rom_dirs(args: &Args) -> Vec<PathBuf> {
     v
 }
 
+/// Locate an Amiga Forever shared hard disk such as `workbench-135.hdf`.
+fn find_shared_hdf(args: &Args, id: &str) -> Option<PathBuf> {
+    let name = format!("workbench-{id}.hdf");
+    let mut dirs = vec![PathBuf::from("hdf")];
+    for d in rom_dirs(args) {
+        dirs.push(d.join("../hdf"));
+        dirs.push(d.join("hdf"));
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        dirs.push(PathBuf::from(home).join(".config/amiga/hdf"));
+    }
+    dirs.into_iter().map(|d| d.join(&name)).find(|p| p.is_file())
+}
+
 fn find_rom(args: &Args, candidates: &[&str]) -> PathBuf {
     for dir in rom_dirs(args) {
         for c in candidates {
@@ -186,9 +207,6 @@ fn main() {
         Some(p) if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("rp9")) => {
             let r = amiga::rp9::load(p).unwrap_or_else(|e| die(format!("{}: {e}", p.display())));
             log::info!("RP9: {} ({})", r.title, r.system);
-            if r.floppies.is_empty() && !r.harddrives.is_empty() {
-                die("this RP9 boots from a hard disk image (HDF), which is not supported yet");
-            }
             for (name, data) in &r.floppies {
                 floppies.push(frontend::SwapDisk { name: name.clone(), data: data.clone(), path: None });
             }
@@ -251,7 +269,43 @@ fn main() {
         cfg.drives = cfg.drives.max(i + 2);
     }
 
+    // Hard disks: an RP9's shared system disk boots first, then its own images.
+    let mut hdfs: Vec<(String, Vec<u8>, bool)> = vec![];
+    if let Some(r) = &rp9 {
+        if let Some(b) = &r.boot_hdf {
+            let p = find_shared_hdf(&args, b).unwrap_or_else(|| {
+                die(format!("this title boots from workbench-{b}.hdf; put it in ./hdf (from the Amiga Forever \"Shared/hdf\" folder)"))
+            });
+            let data = std::fs::read(&p).unwrap_or_else(|e| die(format!("{}: {e}", p.display())));
+            log::info!("boot hard disk {}", p.display());
+            hdfs.push((format!("workbench-{b}.hdf"), data, true));
+        }
+        for (name, data) in &r.hdfs {
+            hdfs.push((name.clone(), data.clone(), false));
+        }
+    }
+    for p in &args.hdf {
+        let data = std::fs::read(p).unwrap_or_else(|e| die(format!("{}: {e}", p.display())));
+        hdfs.push((p.display().to_string(), data, false));
+    }
+
     let mut amiga = Amiga::new(cfg, rom.data);
+    if !hdfs.is_empty() {
+        if hdfs.len() > 7 {
+            die("at most 7 hard disks are supported");
+        }
+        let rom_path = args.scsi_rom.clone().unwrap_or_else(|| find_rom(&args, &["amiga-boot-a590.rom"]));
+        let rom = amiga::rom::load_raw(&rom_path, args.rom_key.as_deref()).unwrap_or_else(|e| die(e));
+        if rom.len() != 0x4000 {
+            die(format!("{}: expected a 16 KB A590/A2091 boot ROM", rom_path.display()));
+        }
+        let mut ctl = amiga::a2091::A2091::new(rom);
+        for (i, (name, data, ro)) in hdfs.into_iter().enumerate() {
+            log::info!("SCSI unit {i}: {name} ({} KB)", data.len() / 1024);
+            ctl.disks[i] = Some(amiga::a2091::HardDisk::new(name, data, ro));
+        }
+        amiga.board.scsi = Some(ctl);
+    }
     amiga.board.audio.stereo_separation = args.stereo_separation.clamp(0.0, 1.0);
     let ext = args.ext_rom.clone().or_else(|| {
         // AROS ships its kernel split across a main and an extension ROM.
@@ -290,6 +344,10 @@ fn main() {
         if args.debug_dump {
             amiga.pc_history = Some(Default::default());
             amiga.tracepoint = std::env::var("TRACE_AT").ok().and_then(|v| u32::from_str_radix(&v, 16).ok());
+            amiga.trace_range = std::env::var("TRACE_RANGE").ok().and_then(|v| {
+                let (lo, hi) = v.split_once('-')?;
+                Some((u32::from_str_radix(lo, 16).ok()?, u32::from_str_radix(hi, 16).ok()?))
+            });
             amiga.breakpoint = std::env::var("BREAK_AT").ok().and_then(|v| u32::from_str_radix(&v, 16).ok());
         }
         let mut audio_peak = 0f32;

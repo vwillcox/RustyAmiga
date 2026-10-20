@@ -37,9 +37,10 @@ pub fn checksum_ok(data: &[u8]) -> bool {
     sum == 0xffff_ffff
 }
 
-pub fn load(path: &Path, key_path: Option<&Path>) -> Result<Rom, RomError> {
+/// Load any ROM image (Kickstart or expansion board), decrypting Amiga Forever ROMs.
+pub fn load_raw(path: &Path, key_path: Option<&Path>) -> Result<Vec<u8>, RomError> {
     let raw = std::fs::read(path).map_err(|e| RomError::Io(path.display().to_string(), e))?;
-    let mut data = if raw.starts_with(CLOANTO_MAGIC) {
+    Ok(if raw.starts_with(CLOANTO_MAGIC) {
         let key_file = match key_path {
             Some(k) => k.to_path_buf(),
             None => path.with_file_name("rom.key"),
@@ -51,7 +52,11 @@ pub fn load(path: &Path, key_path: Option<&Path>) -> Result<Rom, RomError> {
         decrypt(&raw[CLOANTO_MAGIC.len()..], &key)
     } else {
         raw
-    };
+    })
+}
+
+pub fn load(path: &Path, key_path: Option<&Path>) -> Result<Rom, RomError> {
+    let mut data = load_raw(path, key_path)?;
     // Some dumps are byte-swapped or carry a 512-byte header; handle the header case.
     if data.len() % 1024 == 512 {
         data.drain(..512);

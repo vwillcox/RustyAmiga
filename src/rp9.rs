@@ -25,6 +25,11 @@ pub struct Rp9 {
     /// Floppy images in priority order (only filled by `load`): (name, contents).
     pub floppies: Vec<(String, Vec<u8>)>,
     pub harddrives: Vec<String>,
+    /// Hard disk images in priority order (only filled by `load`): (name, contents).
+    pub hdfs: Vec<(String, Vec<u8>)>,
+    /// Shared Amiga Forever system hard disk to boot from, e.g. "135" for
+    /// `workbench-135.hdf`.
+    pub boot_hdf: Option<String>,
 }
 
 impl Rp9 {
@@ -167,7 +172,16 @@ fn parse_manifest(xml: &str) -> Rp9 {
         .collect();
     floppies.sort_by_key(|f| f.0);
     rp.floppy_names = floppies.into_iter().map(|(_, n)| n).collect();
-    rp.harddrives = tag_text(xml, "harddrive").into_iter().map(|(_, t)| t.to_string()).collect();
+    let mut hds: Vec<(u32, String)> = tag_text(xml, "harddrive")
+        .into_iter()
+        .map(|(a, t)| (attr(a, "priority").and_then(|p| p.parse().ok()).unwrap_or(99), t.to_string()))
+        .collect();
+    hds.sort_by_key(|h| h.0);
+    rp.harddrives = hds.into_iter().map(|(_, n)| n).collect();
+    rp.boot_hdf = tag_text(xml, "boot")
+        .into_iter()
+        .find(|(a, _)| attr(a, "type") == Some("hdf"))
+        .map(|(_, t)| t.to_string());
     rp
 }
 
@@ -184,6 +198,14 @@ pub fn load(path: &Path) -> Result<Rp9, String> {
             .map_err(|e| e.to_string())?;
         rp.floppies.push((name, data));
     }
+    for name in rp.harddrives.clone() {
+        let mut data = vec![];
+        zip.by_name(&name)
+            .map_err(|_| format!("RP9 is missing {name}"))?
+            .read_to_end(&mut data)
+            .map_err(|e| e.to_string())?;
+        rp.hdfs.push((name, data));
+    }
     Ok(rp)
 }
 
@@ -198,8 +220,8 @@ impl Rp9 {
         if let Some(c) = &self.cpu {
             return Some(format!("needs a {c} CPU"));
         }
-        if self.floppy_names.is_empty() {
-            return Some("boots from a hard disk image (HDF), not supported yet".into());
+        if self.floppy_names.is_empty() && self.harddrives.is_empty() && self.boot_hdf.is_none() {
+            return Some("no floppy or hard disk media".into());
         }
         None
     }

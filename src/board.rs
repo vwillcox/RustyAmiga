@@ -1,6 +1,7 @@
 //! The Amiga motherboard: memory map, bus timing, Agnus DMA, copper and the
 //! glue between CIAs, Paula, Denise, floppy drives and the keyboard.
 
+use crate::a2091::{Dma, A2091};
 use crate::bus::Bus;
 use crate::chipset::audio::{Audio, AudioMem};
 use crate::chipset::blitter::Blitter;
@@ -46,6 +47,9 @@ pub struct Board {
     pub fast: Vec<u8>,
     fast_base: Option<u32>,
     autoconfig_done: bool,
+    /// A590/A2091 SCSI controller, if fitted (configured after the fast RAM).
+    pub scsi: Option<A2091>,
+    scsi_ac_done: bool,
     pub rom: Vec<u8>,
     /// Extension ROM at $E00000 (AROS, CD32, CDTV).
     pub ext_rom: Vec<u8>,
@@ -134,6 +138,8 @@ pub struct Board {
     diwhigh: Option<u16>,
 
     pub serial_out: Vec<u8>,
+    /// PC of the instruction being executed (for device tracing).
+    pub cur_pc: u32,
 }
 
 impl AudioMem for (&Vec<u8>, u32) {
@@ -159,6 +165,8 @@ impl Board {
             fast: vec![0; cfg.fast_kb as usize * 1024],
             fast_base: None,
             autoconfig_done: false,
+            scsi: None,
+            scsi_ac_done: false,
             rom,
             rom_mask,
             ext_rom: vec![],
@@ -226,6 +234,7 @@ impl Board {
             pal: !cfg.ntsc,
             diwhigh: None,
             serial_out: vec![],
+            cur_pc: 0,
             cfg,
         }
     }
@@ -267,6 +276,10 @@ impl Board {
         self.ciab_prb_prev = 0xff;
         self.fast_base = None;
         self.autoconfig_done = false;
+        self.scsi_ac_done = false;
+        if let Some(s) = self.scsi.as_mut() {
+            s.reset();
+        }
     }
 
     // ---- time -------------------------------------------------------------
@@ -442,6 +455,7 @@ impl Board {
                 self.spr_slot[n] = SprSlot::None;
             }
         }
+        self.scsi_tick();
         self.update_cia_irq();
         self.start_line();
     }
@@ -733,7 +747,8 @@ impl Board {
     }
 
     fn update_cia_irq(&mut self) {
-        if self.cia_a.irq() {
+        // Expansion boards share Paula's INT2 input with CIA-A.
+        if self.cia_a.irq() || self.scsi.as_ref().is_some_and(|s| s.irq()) {
             self.intreq |= int::PORTS;
         }
         if self.cia_b.irq() {
@@ -1082,32 +1097,41 @@ impl Board {
         }
     }
 
-    // ---- autoconfig (Zorro II fast RAM) ----------------------------------------
+    // ---- autoconfig (Zorro II fast RAM, then the SCSI controller) --------------
+
+    fn autoconfig_regs(&self) -> Option<[u8; 16]> {
+        if !self.fast.is_empty() && !self.autoconfig_done {
+            // er_Type: Zorro II, memory, link to free pool; size code.
+            let size_code: u8 = match self.fast.len() / 1024 {
+                64 => 1,
+                128 => 2,
+                256 => 3,
+                512 => 4,
+                1024 => 5,
+                2048 => 6,
+                4096 => 7,
+                _ => 0,
+            };
+            return Some([
+                0xc0 | 0x20 | size_code, // er_Type (not inverted)
+                0x01,                    // er_Product
+                0x80,                    // er_Flags: memory space preferred
+                0x00,
+                0x07, // manufacturer hi
+                0xdb, // manufacturer lo
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            ]);
+        }
+        if self.scsi.is_some() && !self.scsi_ac_done {
+            return Some(A2091::autoconfig_regs());
+        }
+        None
+    }
 
     fn autoconfig_read(&self, addr: u32) -> u8 {
-        if self.fast.is_empty() || self.autoconfig_done {
+        let Some(regs) = self.autoconfig_regs() else {
             return 0xff;
-        }
-        // er_Type: Zorro II, memory, link to free pool; size code.
-        let size_code: u8 = match self.fast.len() / 1024 {
-            64 => 1,
-            128 => 2,
-            256 => 3,
-            512 => 4,
-            1024 => 5,
-            2048 => 6,
-            4096 => 7,
-            _ => 0,
         };
-        let regs: [u8; 16] = [
-            0xc0 | 0x20 | size_code, // er_Type (not inverted)
-            0x01,                    // er_Product
-            0x80,                    // er_Flags: memory space preferred
-            0x00,
-            0x07, // manufacturer hi
-            0xdb, // manufacturer lo
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        ];
         let off = (addr & 0xff) as usize;
         let idx = off / 4;
         let nibble_hi = off & 2 == 0;
@@ -1119,19 +1143,70 @@ impl Board {
     }
 
     fn autoconfig_write(&mut self, addr: u32, v: u8) {
-        if self.fast.is_empty() || self.autoconfig_done {
+        if !self.fast.is_empty() && !self.autoconfig_done {
+            match addr & 0xff {
+                0x48 => {
+                    self.fast_base = Some((v as u32 >> 4) << 20 | (self.fast_base.unwrap_or(0) & 0x0f_0000));
+                    self.autoconfig_done = true;
+                }
+                0x4a => {
+                    self.fast_base = Some((self.fast_base.unwrap_or(0) & 0xf0_0000) | (v as u32 >> 4) << 16);
+                }
+                0x4c => self.autoconfig_done = true,
+                _ => {}
+            }
+        } else if let Some(s) = self.scsi.as_mut().filter(|_| !self.scsi_ac_done) {
+            match addr & 0xff {
+                0x48 => {
+                    s.base = Some((v as u32 >> 4) << 20 | (s.base.unwrap_or(0) & 0x0f_0000));
+                    self.scsi_ac_done = true;
+                    log::debug!("a2091 configured at {:06x}", s.base.unwrap());
+                }
+                0x4a => s.base = Some((s.base.unwrap_or(0) & 0xf0_0000) | (v as u32 >> 4) << 16),
+                0x4c => self.scsi_ac_done = true,
+                _ => {}
+            }
+        }
+    }
+
+    // ---- SCSI controller --------------------------------------------------------
+
+    fn scsi_tick(&mut self) {
+        if self.scsi.is_none() {
             return;
         }
-        match addr & 0xff {
-            0x48 => {
-                self.fast_base = Some((v as u32 >> 4) << 20 | (self.fast_base.unwrap_or(0) & 0x0f_0000));
-                self.autoconfig_done = true;
+        let now = self.cck * 2;
+        while let Some(dma) = self.scsi.as_mut().unwrap().tick(now) {
+            match dma {
+                Dma::ToMemory(addr, data) => {
+                    for (i, b) in data.into_iter().enumerate() {
+                        self.dma_poke(addr.wrapping_add(i as u32), b);
+                    }
+                }
+                Dma::FromMemory(addr, n) => {
+                    let data = (0..n as u32).map(|i| self.dma_peek(addr.wrapping_add(i))).collect();
+                    self.scsi.as_mut().unwrap().dma_done(data);
+                }
             }
-            0x4a => {
-                self.fast_base = Some((self.fast_base.unwrap_or(0) & 0xf0_0000) | (v as u32 >> 4) << 16);
-            }
-            0x4c => self.autoconfig_done = true,
+        }
+        self.update_cia_irq();
+    }
+
+    fn dma_poke(&mut self, a: u32, v: u8) {
+        match self.region(a, true) {
+            Region::Chip(o) => self.chip[o] = v,
+            Region::Slow(o) => self.slow[o] = v,
+            Region::Fast(o) => self.fast[o] = v,
             _ => {}
+        }
+    }
+
+    fn dma_peek(&self, a: u32) -> u8 {
+        match self.region(a, false) {
+            Region::Chip(o) => self.chip[o],
+            Region::Slow(o) => self.slow[o],
+            Region::Fast(o) => self.fast[o],
+            _ => 0,
         }
     }
 
@@ -1169,6 +1244,7 @@ impl Board {
             Region::Fast(o) => b(o, &self.fast),
             Region::Rom(o) => b(o, &self.rom),
             Region::ExtRom(o) => b(o, &self.ext_rom),
+            Region::Scsi(o) if o >= 0x2000 => self.scsi.as_ref().unwrap().peek_rom16(o),
             _ => 0,
         }
     }
@@ -1187,6 +1263,7 @@ enum Region {
     Custom,
     Cia,
     Autoconfig,
+    Scsi(u32),
     None,
 }
 
@@ -1221,6 +1298,9 @@ impl Board {
             }
             0xdf => Region::Custom,
             0xe8 => Region::Autoconfig,
+            0xe9..=0xef if self.scsi.as_ref().and_then(|s| s.contains(a)).is_some() => {
+                Region::Scsi(self.scsi.as_ref().unwrap().contains(a).unwrap())
+            }
             0xf8..=0xff => Region::Rom((a & self.rom_mask) as usize),
             0xe0..=0xe7 if !self.ext_rom.is_empty() => Region::ExtRom((a as usize - 0xe0_0000) % self.ext_rom.len()),
             0xe0..=0xe7 if self.rom.len() > 0x80000 => Region::Rom((a & self.rom_mask) as usize),
@@ -1274,6 +1354,16 @@ impl Bus for Board {
                 self.cycles += 4;
                 self.autoconfig_read(addr)
             }
+            Region::Scsi(o) => {
+                self.cycles += 4;
+                let now = self.cycles;
+                let v = self.scsi.as_mut().unwrap().read8(o, now);
+                if o < 0x2000 {
+                    log::trace!("a2091 pc={:06x} read8( {o:02x} -> {v:x}", self.cur_pc);
+                }
+                self.update_cia_irq();
+                v
+            }
             Region::None => {
                 self.cycles += 4;
                 0
@@ -1316,6 +1406,16 @@ impl Bus for Board {
                 self.cycles += 4;
                 (self.autoconfig_read(addr) as u16) << 8 | 0xff
             }
+            Region::Scsi(o) => {
+                self.cycles += 4;
+                let now = self.cycles;
+                let v = self.scsi.as_mut().unwrap().read16(o, now);
+                if o < 0x2000 {
+                    log::trace!("a2091 pc={:06x} read16 {o:02x} -> {v:x}", self.cur_pc);
+                }
+                self.update_cia_irq();
+                v
+            }
             Region::None => {
                 self.cycles += 4;
                 0
@@ -1351,6 +1451,13 @@ impl Bus for Board {
                 self.cycles += 4;
                 self.autoconfig_write(addr, v);
             }
+            Region::Scsi(o) => {
+                self.cycles += 4;
+                let now = self.cycles;
+                log::trace!("a2091 pc={:06x} write8( {o:02x} = {v:x}", self.cur_pc);
+                self.scsi.as_mut().unwrap().write8(o, v, now);
+                self.update_cia_irq();
+            }
             Region::Rom(_) | Region::ExtRom(_) | Region::None => self.cycles += 4,
         }
     }
@@ -1384,6 +1491,13 @@ impl Bus for Board {
             Region::Autoconfig => {
                 self.cycles += 4;
                 self.autoconfig_write(addr, (v >> 8) as u8);
+            }
+            Region::Scsi(o) => {
+                self.cycles += 4;
+                let now = self.cycles;
+                log::trace!("a2091 pc={:06x} write16 {o:02x} = {v:x}", self.cur_pc);
+                self.scsi.as_mut().unwrap().write16(o, v, now);
+                self.update_cia_irq();
             }
             Region::Rom(_) | Region::ExtRom(_) | Region::None => self.cycles += 4,
         }
@@ -1428,11 +1542,13 @@ pub struct Amiga {
     pub break_hit: bool,
     /// Print registers every time the PC reaches this address.
     pub tracepoint: Option<u32>,
+    /// Print every instruction executed within this address range.
+    pub trace_range: Option<(u32, u32)>,
 }
 
 impl Amiga {
     pub fn new(cfg: Config, rom: Vec<u8>) -> Amiga {
-        let mut a = Amiga { cpu: crate::cpu::Cpu::new(), board: Board::new(cfg, rom), pc_history: None, breakpoint: None, break_hit: false, tracepoint: None };
+        let mut a = Amiga { cpu: crate::cpu::Cpu::new(), board: Board::new(cfg, rom), pc_history: None, breakpoint: None, break_hit: false, tracepoint: None, trace_range: None };
         a.hard_reset();
         a
     }
@@ -1465,6 +1581,14 @@ impl Amiga {
                     c.pc, self.board.frame_count, self.board.vpos, self.board.hpos, c.d, c.a
                 );
             }
+            if let Some((lo, hi)) = self.trace_range {
+                let pc = self.cpu.pc;
+                if (lo..hi).contains(&pc) {
+                    let c = &self.cpu;
+                    let (t, _) = crate::disasm::disasm(pc, &|x| self.board.peek16(x));
+                    eprintln!("{pc:06x} {t:<32} D={:08x?} A={:08x?}", c.d, c.a);
+                }
+            }
             if self.breakpoint == Some(self.cpu.pc) && !self.break_hit {
                 self.break_hit = true;
                 return;
@@ -1477,6 +1601,7 @@ impl Amiga {
                     h.push_back(self.cpu.pc);
                 }
             }
+            self.board.cur_pc = self.cpu.pc;
             self.cpu.step(&mut self.board);
             self.board.sync();
         }

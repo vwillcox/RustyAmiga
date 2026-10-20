@@ -1,3 +1,4 @@
+pub mod a2091;
 pub mod board;
 pub mod bus;
 pub mod chipset;
