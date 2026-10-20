@@ -245,7 +245,7 @@ impl Rp9 {
         // A requested 68030/68040 is not a hard requirement: many such titles
         // run on the emulated 68020, and compat.tsv records which do not.
         if self.floppy_names.is_empty() && self.harddrives.is_empty() && self.boot_hdf.is_none() && self.boot_adf.is_none() {
-            return Some("no floppy or hard disk media".into());
+            return Some("no Amiga disk media (Amiga Forever video, gallery or CD package)".into());
         }
         None
     }

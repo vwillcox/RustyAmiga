@@ -240,6 +240,9 @@ fn main() {
         Some(p) if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("rp9")) => {
             let r = amiga::rp9::load(p).unwrap_or_else(|e| die(format!("{}: {e}", p.display())));
             log::info!("RP9: {} ({})", r.title, r.system);
+            if r.floppy_names.is_empty() && r.harddrives.is_empty() && r.boot_hdf.is_none() && r.boot_adf.is_none() {
+                die(format!("{}: {}", p.display(), r.unsupported_reason().unwrap_or_default()));
+            }
             for (name, data) in &r.floppies {
                 floppies.push(frontend::SwapDisk { name: name.clone(), data: data.clone(), path: None });
             }

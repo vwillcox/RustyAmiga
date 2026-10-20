@@ -48,12 +48,18 @@ The A590/A2091 controller is emulated at the hardware level and driven by Commod
 - Shared boot media come from the AF DVD: `./hdf/workbench-*.hdf` and `./adf/amiga-os-*-workbench.adf`.
 - The SingleStepTests data lives in `./sst` (gitignored). Run it with `SST_DIR=sst/v1 cargo test --release --test sst -- --nocapture`. STOP fails 1230 cases, which was already the case before this work.
 
-### Open items found in this session
-- **Tulou/Traktor 68060 demos exit silently on the 68040** (Carbon, The Chronicles, Fleetwood and others). There are no exceptions; the next lead is what they check (AttnFlags after 68040.library, PCR?).
-- **Some A4000 demos only reach their precalc or loading screens within 90 s** (Incision, Multiverse, The Castle, Lapsuus). They probably need more CPU speed or a longer test.
-- **No picture yet:** AmiBee, Overdose, Aerial Racers and My House (AGA floppies); Back to Planet Earth, Captured Dreams, Sumea, HOG and Neo 2 (A1200 HDFs); Concrete, Psyleflesk and Tour de Scene (A4000).
-- **HD floppy drives are not emulated** (Christmas Breakdown).
-- **The A4000 batch results are not yet recorded in data/compat.tsv.** About 40 of 57 titles show content; see the a4k batch.
+### Fixed after the first AGA pass
+- **Lisa's DENISEID now reads `$00F8`.** Its upper byte is the revision; with `$FF` there, graphics.library built an ECS-limited display database and 8-plane OS screens failed to open. This fixed about a dozen OS-friendly AGA demos.
+- **An empty IDE port reads `$FF`.** Previously scsi.device retried its probe 30 times, which delayed every A1200 floppy boot.
+
+### Front-panel lights
+The window shows power, per-drive floppy (green: motor on; blinking yellow: disk DMA running) and hard disk (amber: busy) lights under the picture. `--leds` adds them to headless screenshots.
+
+### Remaining open items
+- **No picture within 90 s:** Concrete, HOG, Lux Aeterna Luceat Eis, Mental, Psylteflesk, Tour de Scene and The Chronicles of Professor Arronax (A4000); Aerial Racers, AmiBee and Overdose (A1200 floppies; Overdose plays music with bitplane DMA off).
+- **Still precalculating at 90 s:** Incision, Lapsuus, Multiverse and The Castle.
+- **Not emulated:** HD floppy drives (Christmas Breakdown), the A3000 model, CD32/CDTV, PowerPC boards, and Amiga Forever host-folder drives (A4000 Enhanced, AROS, Walker).
+- **Not Amiga software:** the Videos and Gallery packages (DVD video and host images for Amiga Forever's player). The emulator now refuses them with that explanation.
 
 ## Known issues and open items
 
@@ -73,5 +79,5 @@ The A590/A2091 controller is emulated at the hardware level and driven by Commod
 
 ## Next milestones
 
-1. Record the A4000 results in compat.tsv and investigate the 68060-demo exits.
-2. HD floppies; the remaining blank AGA titles.
+1. HD floppy drives; the A3000 (ECS, 68030, SDMAC SCSI).
+2. The remaining blank AGA titles; CD32/CDTV.
