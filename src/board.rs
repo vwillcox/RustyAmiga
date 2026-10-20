@@ -39,6 +39,17 @@ struct DiskDma {
     words: u32,
 }
 
+/// Front-panel lights: what a real Amiga's LEDs would show.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Leds {
+    /// Power LED at full brightness (CIA-A /LED low; it dims with the audio filter off).
+    pub power: bool,
+    /// Per floppy drive, if fitted: (motor on, disk DMA running on it).
+    pub floppy: [Option<(bool, bool)>; 4],
+    /// Hard disk activity counter, if a controller is fitted.
+    pub hd: Option<u64>,
+}
+
 pub struct Board {
     pub cfg: Config,
     pub chip: Vec<u8>,
@@ -266,6 +277,23 @@ impl Board {
             ramsey_ctl: 0,
             cfg,
         }
+    }
+
+    pub fn leds(&self) -> Leds {
+        let c = &self.cia_a;
+        let pra = (c.pra & c.ddra) | !c.ddra;
+        let mut floppy = [None; 4];
+        for (i, d) in self.drives.iter().enumerate() {
+            if d.present {
+                floppy[i] = Some((d.motor, d.motor && d.selected && self.disk_dma.is_some()));
+            }
+        }
+        let hd = match (&self.gayle, &self.scsi) {
+            (Some(g), _) if g.drives.iter().any(|d| d.is_some()) => Some(g.activity),
+            (_, Some(s)) => Some(s.activity),
+            _ => None,
+        };
+        Leds { power: pra & 2 == 0, floppy, hd }
     }
 
     pub fn framebuffer(&self) -> (&[u32], usize, usize) {

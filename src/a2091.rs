@@ -252,6 +252,8 @@ struct SatJob {
 }
 
 pub struct A2091 {
+    /// Counts SCSI commands (for the activity LED).
+    pub activity: u64,
     rom: Vec<u8>,
     pub base: Option<u32>,
     pub disks: [Option<HardDisk>; 7],
@@ -280,6 +282,7 @@ pub struct A2091 {
 impl A2091 {
     pub fn new(rom: Vec<u8>) -> A2091 {
         A2091 {
+            activity: 0,
             rom,
             base: None,
             disks: Default::default(),
@@ -302,8 +305,10 @@ impl A2091 {
     pub fn reset(&mut self) {
         let rom = std::mem::take(&mut self.rom);
         let disks = std::mem::take(&mut self.disks);
+        let activity = self.activity;
         *self = A2091::new(rom);
         self.disks = disks;
+        self.activity = activity;
     }
 
     /// Autoconfig ROM contents (not inverted).
@@ -632,6 +637,7 @@ impl A2091 {
     }
 
     fn run_command(&mut self) {
+        self.activity += 1;
         let nx = self.nexus.as_mut().unwrap();
         let disk = self.disks[nx.target].as_mut().unwrap();
         let out_len = HardDisk::data_out_len(&nx.cdb);
@@ -827,6 +833,7 @@ impl A2091 {
             return Some(Dma::FromMemory(self.acr, out_len));
         }
         let j = self.sat.take().unwrap();
+        self.activity += 1;
         let disk = self.disks[j.target].as_mut().unwrap();
         let mut data = vec![];
         let status = if j.lun != 0 {

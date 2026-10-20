@@ -80,6 +80,9 @@ struct Args {
     /// Extra ADFs for the disk swapper (PageDown cycles DF0 through df0 + these).
     #[arg(long = "swap")]
     swap: Vec<PathBuf>,
+    /// Headless: draw the front-panel activity lights under screenshots.
+    #[arg(long)]
+    leds: bool,
     /// In headless mode, also save a screenshot every N frames (name_NNNNN.png).
     #[arg(long)]
     shot_every: Option<u64>,
@@ -125,6 +128,23 @@ fn write_wav(path: &PathBuf, samples: &[f32], rate: u32) -> std::io::Result<()> 
         f.write_all(&((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes())?;
     }
     Ok(())
+}
+
+/// Save the current picture, optionally with the activity-light panel below it.
+fn save_shot(path: &PathBuf, amiga: &Amiga, panel: Option<(bool, u64)>) {
+    let (fb, w, h) = amiga.board.framebuffer();
+    let res = match panel {
+        None => save_png(path, fb, w, h),
+        Some((hd_active, tick)) => {
+            let ph = amiga::panel::PANEL_H;
+            let mut bytes: Vec<u8> = fb.iter().flat_map(|p| p.to_le_bytes()).collect();
+            bytes.resize((h + ph) * w * 4, 0);
+            amiga::panel::draw(&mut bytes, w, h, &amiga.board.leds(), hd_active, tick);
+            let px: Vec<u32> = bytes.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+            save_png(path, &px, w, h + ph)
+        }
+    };
+    res.expect("write screenshot");
 }
 
 fn save_png(path: &PathBuf, fb: &[u32], w: usize, h: usize) -> std::io::Result<()> {
@@ -459,8 +479,16 @@ fn main() {
                 (f.parse().unwrap_or_else(|_| die("bad frame in --type")), amiga::keyboard::text_to_keys(text))
             })
             .collect();
+        let (mut hd_seen, mut hd_changed) = (0u64, 0u64);
         for f in 1..=args.frames {
             amiga.run_frame();
+            if let Some(n) = amiga.board.leds().hd {
+                if n != hd_seen {
+                    hd_seen = n;
+                    hd_changed = f;
+                }
+            }
+            let panel = args.leds.then_some((hd_changed > 0 && f - hd_changed < 8, f));
             if amiga.break_hit {
                 log::info!("breakpoint hit at frame {f}");
                 break;
@@ -483,8 +511,7 @@ fn main() {
                 if f % n == 0 {
                     let stem = p.with_extension("");
                     let path = PathBuf::from(format!("{}_{:05}.png", stem.display(), f));
-                    let (fb, w, h) = amiga.board.framebuffer();
-                    save_png(&path, fb, w, h).expect("write screenshot");
+                    save_shot(&path, &amiga, panel);
                 }
             }
         }
@@ -532,8 +559,8 @@ fn main() {
             log::info!("serial: {}", String::from_utf8_lossy(&amiga.board.serial_out));
         }
         if let Some(p) = &args.screenshot {
-            let (fb, w, h) = amiga.board.framebuffer();
-            save_png(p, fb, w, h).expect("write screenshot");
+            let panel = args.leds.then_some((false, args.frames));
+            save_shot(p, &amiga, panel);
         }
         for d in amiga.board.drives.iter_mut() {
             d.eject();

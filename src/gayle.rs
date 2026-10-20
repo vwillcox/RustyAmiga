@@ -98,6 +98,8 @@ enum Xfer {
 pub struct Gayle {
     /// A4000 IDE (no Gayle registers, different address decode).
     pub a4000: bool,
+    /// Counts drive commands and sector transfers (for the activity LED).
+    pub activity: u64,
     pub drives: [Option<AtaDrive>; 2],
     id_pos: u8,
     irq_latch: u8,
@@ -127,6 +129,7 @@ impl Gayle {
     pub fn new() -> Gayle {
         Gayle {
             a4000: false,
+            activity: 0,
             drives: [None, None],
             id_pos: 0,
             irq_latch: 0,
@@ -154,10 +157,11 @@ impl Gayle {
 
     pub fn reset(&mut self) {
         let drives = std::mem::take(&mut self.drives);
-        let a4000 = self.a4000;
+        let (a4000, activity) = (self.a4000, self.activity);
         *self = Gayle::new();
         self.drives = drives;
         self.a4000 = a4000;
+        self.activity = activity;
     }
 
     /// Interrupt line to Paula's INT2 (PORTS).
@@ -385,6 +389,7 @@ impl Gayle {
         if self.drive().is_none() {
             return;
         }
+        self.activity += 1;
         self.error = 0;
         let count = if self.nsect == 0 { 256 } else { self.nsect as u32 };
         match cmd {
@@ -457,6 +462,7 @@ impl Gayle {
     /// Fill the buffer with the next block of sectors for a read.
     fn load_sectors(&mut self) {
         let Xfer::Read { count, per_irq } = self.xfer else { return };
+        self.activity += 1;
         let n = per_irq.min(count);
         let d = self.drives[self.unit()].as_ref().unwrap();
         if self.lba + n > d.cyls * d.heads * d.secs && self.lba + n > d.blocks() {

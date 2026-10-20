@@ -63,6 +63,11 @@ struct App {
     gilrs: Option<gilrs::Gilrs>,
     fps_count: u32,
     fps_time: Instant,
+    /// Frame counter for blinking the activity lights.
+    tick: u64,
+    /// Hard disk activity counter last seen, and the frame it last changed.
+    hd_seen: u64,
+    hd_changed: u64,
 }
 
 const HELP: &str = "\
@@ -72,7 +77,9 @@ Host keys:
   Home          joystick on cursor keys (Right Ctrl = fire)
   PageDown      next disk in swap list into DF0
   PageUp        hard reset           Insert     Amiga HELP key
-  Drag an .adf file onto the window to insert it into DF0.";
+  Drag an .adf file onto the window to insert it into DF0.
+The strip under the picture shows the power, floppy (green: motor on,
+blinking yellow: reading/writing) and hard disk (amber: busy) lights.";
 
 /// Map a host key to an Amiga raw key code.
 fn amiga_key(k: KeyCode) -> Option<u8> {
@@ -340,6 +347,13 @@ impl App {
                 q.pop_front();
             }
         }
+        self.tick += 1;
+        if let Some(n) = self.amiga.board.leds().hd {
+            if n != self.hd_seen {
+                self.hd_seen = n;
+                self.hd_changed = self.tick;
+            }
+        }
         self.fps_count += 1;
         if self.fps_time.elapsed() >= Duration::from_secs(2) {
             log::debug!("{:.1} fps", self.fps_count as f64 / self.fps_time.elapsed().as_secs_f64());
@@ -351,9 +365,14 @@ impl App {
     fn render(&mut self) {
         let Some(px) = self.pixels.as_mut() else { return };
         let (fb, _, _) = self.amiga.board.framebuffer();
-        for (dst, src) in px.frame_mut().chunks_exact_mut(4).zip(fb.iter()) {
+        let frame = px.frame_mut();
+        for (dst, src) in frame.chunks_exact_mut(4).zip(fb.iter()) {
             dst.copy_from_slice(&src.to_le_bytes());
         }
+        let leds = self.amiga.board.leds();
+        // The HD light stays on briefly after each command so short bursts show.
+        let hd_active = self.tick.saturating_sub(self.hd_changed) < 8 && self.hd_changed > 0;
+        amiga::panel::draw(frame, FB_W, FB_H, &leds, hd_active, self.tick);
         if let Err(e) = px.render() {
             log::error!("render failed: {e}");
         }
@@ -367,12 +386,12 @@ impl ApplicationHandler for App {
         }
         let attrs = Window::default_attributes()
             .with_title("Amiga")
-            .with_inner_size(LogicalSize::new(FB_W as f64 * 1.5, FB_H as f64 * 1.5))
-            .with_min_inner_size(LogicalSize::new(FB_W as f64 / 2.0, FB_H as f64 / 2.0));
+            .with_inner_size(LogicalSize::new(FB_W as f64 * 1.5, (FB_H + amiga::panel::PANEL_H) as f64 * 1.5))
+            .with_min_inner_size(LogicalSize::new(FB_W as f64 / 2.0, (FB_H + amiga::panel::PANEL_H) as f64 / 2.0));
         let window = Arc::new(el.create_window(attrs).expect("create window"));
         let size = window.inner_size();
         let surface = SurfaceTexture::new(size.width, size.height, window.clone());
-        let pixels = Pixels::new(FB_W as u32, FB_H as u32, surface).expect("create pixels surface");
+        let pixels = Pixels::new(FB_W as u32, (FB_H + amiga::panel::PANEL_H) as u32, surface).expect("create pixels surface");
         self.window = Some(window);
         self.pixels = Some(pixels);
         self.next_frame = Instant::now();
@@ -522,6 +541,9 @@ pub fn run(mut amiga: Amiga, opts: Options) {
         gilrs,
         fps_count: 0,
         fps_time: Instant::now(),
+        tick: 0,
+        hd_seen: 0,
+        hd_changed: 0,
     };
     let el = EventLoop::new().expect("event loop");
     el.run_app(&mut app).expect("run event loop");

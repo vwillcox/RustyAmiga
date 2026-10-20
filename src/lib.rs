@@ -9,6 +9,7 @@ pub mod disasm;
 pub mod floppy;
 pub mod gayle;
 pub mod hdf;
+pub mod panel;
 pub mod keyboard;
 pub mod rom;
 pub mod rp9;
