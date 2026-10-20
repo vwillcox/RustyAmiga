@@ -38,7 +38,14 @@ impl Model {
     }
 
     pub fn supported(self) -> bool {
-        matches!(self, Model::A500 | Model::A1000 | Model::A2000 | Model::A500Plus | Model::A600)
+        matches!(self, Model::A500 | Model::A1000 | Model::A2000 | Model::A500Plus | Model::A600 | Model::A1200)
+    }
+
+    pub fn cpu(self) -> crate::cpu::CpuModel {
+        match self {
+            Model::A1200 | Model::A3000 | Model::A4000 | Model::Cd32 => crate::cpu::CpuModel::M68020,
+            _ => crate::cpu::CpuModel::M68000,
+        }
     }
 }
 

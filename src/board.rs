@@ -72,7 +72,9 @@ pub struct Board {
     copcon: u16,
 
     // Agnus bitplane state.
-    bplpt: [u32; 6],
+    bplpt: [u32; 8],
+    /// AGA FMODE (bitplane and sprite fetch widths).
+    fmode: u16,
     bpl1mod: i16,
     bpl2mod: i16,
     ddfstrt: u16,
@@ -183,7 +185,8 @@ impl Board {
             intreq: 0,
             adkcon: 0,
             copcon: 0,
-            bplpt: [0; 6],
+            bplpt: [0; 8],
+            fmode: 0,
             bpl1mod: 0,
             bpl2mod: 0,
             ddfstrt: 0,
@@ -205,7 +208,7 @@ impl Board {
             cop_ir1: 0,
             cop_ir2: 0,
             blitter: Blitter::default(),
-            denise: Denise::new(),
+            denise: Denise::with_aga(cfg.model.chipset() == Chipset::Aga),
             audio: Audio::new(cck_rate, cfg.model.audio_lowpass_hz()),
             dskpt: 0,
             dsklen_prev: 0,
@@ -245,6 +248,32 @@ impl Board {
 
     fn ocs(&self) -> bool {
         self.cfg.model.chipset() == Chipset::Ocs
+    }
+
+    fn aga(&self) -> bool {
+        self.cfg.model.chipset() == Chipset::Aga
+    }
+
+    /// Words fetched per bitplane DMA slot (AGA FMODE 1x/2x/4x).
+    fn bpl_fetch_words(&self) -> u32 {
+        match self.fmode & 3 {
+            0 => 1,
+            3 => 4,
+            _ => 2,
+        }
+    }
+
+    /// Length in colour clocks of one bitplane fetch unit.
+    fn bpl_unit(&self) -> u16 {
+        let fw = self.bpl_fetch_words() as u16;
+        let c0 = self.denise.bplcon0;
+        if self.aga() && c0 & 0x40 != 0 {
+            2 * fw
+        } else if c0 & 0x8000 != 0 {
+            4 * fw
+        } else {
+            8 * fw
+        }
     }
 
     fn lines_per_frame(&self) -> u16 {
@@ -334,12 +363,19 @@ impl Board {
     /// Plane fetched at colour clock `h` inside the fetch window, if any.
     #[inline]
     fn bpl_plane_at(&self, h: u16) -> Option<usize> {
-        const LORES: [u8; 8] = [0, 4, 6, 2, 0, 3, 5, 1];
-        const HIRES: [u8; 8] = [4, 2, 3, 1, 4, 2, 3, 1];
-        let bplcon0 = self.denise.bplcon0;
-        let n = Denise::nplanes(bplcon0);
-        let off = ((h - self.fetch_start) & 7) as usize;
-        let p = if bplcon0 & 0x8000 != 0 { HIRES[off] } else { LORES[off] } as usize;
+        // Plane fetched at each position of a fetch unit (1-based). Units longer
+        // than 8 colour clocks (AGA 2x/4x) fetch in their first 8 slots.
+        const SEQ8: [u8; 8] = [8, 4, 6, 2, 7, 3, 5, 1];
+        const SEQ4: [u8; 4] = [4, 2, 3, 1];
+        const SEQ2: [u8; 2] = [2, 1];
+        let n = self.denise.nplanes(self.denise.bplcon0);
+        let unit = self.bpl_unit();
+        let off = ((h - self.fetch_start) % unit) as usize;
+        let p = match unit {
+            2 => SEQ2[off],
+            4 => SEQ4[off],
+            _ => SEQ8.get(off).copied().unwrap_or(0),
+        } as usize;
         if p == 0 || p > n {
             None
         } else {
@@ -352,9 +388,10 @@ impl Board {
         let start = (self.ddfstrt & mask).clamp(0x18, 0xd8);
         let stop = (self.ddfstop & mask).clamp(start, 0xd8);
         // The last fetch unit starts at the first unit boundary at or after DDFSTOP.
-        let units = (stop - start).div_ceil(8) + 1;
+        let unit = self.bpl_unit().max(8);
+        let units = (stop - start).div_ceil(unit) + 1;
         self.fetch_start = start;
-        self.fetch_end = (start + units * 8).min(0xe0);
+        self.fetch_end = (start + units * unit).min(0xe2);
     }
 
     // ---- per colour clock ---------------------------------------------------
@@ -372,14 +409,18 @@ impl Board {
         let mut bus_used = false;
         if self.bpl_fetch_active(h) {
             if let Some(p) = self.bpl_plane_at(h) {
-                let w = self.chip_word(self.bplpt[p]);
-                self.bplpt[p] = self.bplpt[p].wrapping_add(2);
-                self.write_bpldat(p, w, h);
+                let fw = self.bpl_fetch_words();
+                let mut v = 0u64;
+                for k in 0..fw {
+                    v |= (self.chip_word(self.bplpt[p]) as u64) << (48 - 16 * k);
+                    self.bplpt[p] = self.bplpt[p].wrapping_add(2);
+                }
+                self.write_bpldat(p, v, 16 * fw, h);
                 bus_used = true;
             }
         }
         if h == self.fetch_end && self.vdiw && self.dmacon & (dma::BPL | dma::MASTER) == (dma::BPL | dma::MASTER) {
-            let n = Denise::nplanes(self.denise.bplcon0);
+            let n = self.denise.nplanes(self.denise.bplcon0);
             for p in 0..n {
                 let m = if p & 1 == 0 { self.bpl1mod } else { self.bpl2mod };
                 self.bplpt[p] = self.bplpt[p].wrapping_add(m as i32 as u32);
@@ -502,8 +543,9 @@ impl Board {
         match self.spr_slot[n] {
             SprSlot::None => {}
             SprSlot::Ctl => {
+                // Wide sprites keep each control word in a full-width slot.
                 let w = self.chip_word(self.sprpt[n]);
-                self.sprpt[n] = self.sprpt[n].wrapping_add(2);
+                self.sprpt[n] = self.sprpt[n].wrapping_add(self.denise.spr_width / 8);
                 if second {
                     self.spr_need_ctl[n] = false;
                     self.custom_write_reg(base + 2, w);
@@ -512,14 +554,15 @@ impl Board {
                 }
             }
             SprSlot::Data => {
-                let w = self.chip_word(self.sprpt[n]);
-                self.sprpt[n] = self.sprpt[n].wrapping_add(2);
-                // Memory order per line is DATA (low bit) then DATB (high bit).
-                if second {
-                    self.custom_write_reg(base + 6, w);
-                } else {
-                    self.custom_write_reg(base + 4, w);
+                let words = self.denise.spr_width / 16;
+                let mut v = 0u64;
+                for k in 0..words {
+                    v |= (self.chip_word(self.sprpt[n]) as u64) << (48 - 16 * k);
+                    self.sprpt[n] = self.sprpt[n].wrapping_add(2);
                 }
+                // Memory order per line is DATA (low bit) then DATB (high bit).
+                let x = self.denise_x();
+                self.denise.write_sprite_data(n, second, v, x);
             }
         }
     }
@@ -810,9 +853,9 @@ impl Board {
         self.chip[a + 1] = v as u8;
     }
 
-    fn write_bpldat(&mut self, plane: usize, w: u16, h: u16) {
+    fn write_bpldat(&mut self, plane: usize, v: u64, bits: u32, h: u16) {
         let x0 = (h as usize * 2 + 3) * 2;
-        self.denise.write_bpldat(plane, w, x0);
+        self.denise.write_bpldat(plane, v, bits, x0);
     }
 
     fn start_blit(&mut self, w: u32, h: u32) {
@@ -897,14 +940,13 @@ impl Board {
             }
             0x01c => self.intena,
             0x01e => self.intreq,
-            // DENISEID: OCS Denise has no ID register; ECS Denise (8373) reads $FC.
-            0x07c => {
-                if self.ocs() {
-                    0xffff
-                } else {
-                    0xfffc
-                }
-            }
+            // DENISEID: OCS Denise has no ID register; ECS Denise (8373) reads $FC,
+            // AGA Lisa (4203) $F8.
+            0x07c => match self.cfg.model.chipset() {
+                Chipset::Ocs => 0xffff,
+                Chipset::Ecs => 0xfffc,
+                Chipset::Aga => 0xfff8,
+            },
             _ => 0xffff,
         }
     }
@@ -1047,7 +1089,7 @@ impl Board {
                     _ => {}
                 }
             }
-            0x0e0..=0x0f6 => {
+            0x0e0..=0x0fe if reg < 0x0f8 || self.aga() => {
                 let p = ((reg - 0xe0) >> 2) as usize;
                 if reg & 2 == 0 {
                     self.bplpt[p] = (self.bplpt[p] & 0xffff) | (v as u32) << 16;
@@ -1065,14 +1107,27 @@ impl Board {
                 self.denise.write(reg, v, x);
             }
             0x106 if !self.ocs() => self.denise.bplcon3 = v,
+            0x10c if self.aga() => {
+                let x = self.denise_x();
+                self.denise.write(reg, v, x);
+            }
+            0x1fc if self.aga() => {
+                self.fmode = v;
+                self.denise.spr_width = match (v >> 2) & 3 {
+                    0 => 16,
+                    3 => 64,
+                    _ => 32,
+                };
+                self.update_fetch_window();
+            }
             0x1dc if !self.ocs() => self.pal = v & 0x20 != 0,
             0x1e4 if !self.ocs() => self.diwhigh = Some(v),
             0x108 => self.bpl1mod = (v & 0xfffe) as i16,
             0x10a => self.bpl2mod = (v & 0xfffe) as i16,
-            0x110..=0x11a => {
+            0x110..=0x11e if reg < 0x11c || self.aga() => {
                 let p = ((reg - 0x110) >> 1) as usize;
                 let h = self.hpos;
-                self.write_bpldat(p, v, h);
+                self.write_bpldat(p, (v as u64) << 48, 16, h);
             }
             0x120..=0x13e => {
                 let n = ((reg - 0x120) >> 2) as usize;
@@ -1548,7 +1603,8 @@ pub struct Amiga {
 
 impl Amiga {
     pub fn new(cfg: Config, rom: Vec<u8>) -> Amiga {
-        let mut a = Amiga { cpu: crate::cpu::Cpu::new(), board: Board::new(cfg, rom), pc_history: None, breakpoint: None, break_hit: false, tracepoint: None, trace_range: None };
+        let cpu = crate::cpu::Cpu::with_model(cfg.model.cpu());
+        let mut a = Amiga { cpu, board: Board::new(cfg, rom), pc_history: None, breakpoint: None, break_hit: false, tracepoint: None, trace_range: None };
         a.hard_reset();
         a
     }
