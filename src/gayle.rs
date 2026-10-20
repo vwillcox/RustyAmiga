@@ -284,16 +284,18 @@ impl Gayle {
     // ---- ATA registers ----------------------------------------------------------
 
     fn alt_status(&self) -> u8 {
+        // Nothing drives an empty bus: it floats high, which scsi.device takes
+        // as "no drive" (BSY and DRDY both set).
         if self.drive().is_none() {
-            return 0;
+            return 0xff;
         }
         self.status
     }
 
     fn ide_read(&mut self, reg: u8) -> u8 {
         if self.drive().is_none() && reg != 6 {
-            // No device answers for an absent drive.
-            return if reg == 7 { 0 } else { 0xff };
+            // No device answers for an absent drive: the bus floats high.
+            return 0xff;
         }
         let v = match reg {
             0 => (self.data_read() >> 8) as u8,
