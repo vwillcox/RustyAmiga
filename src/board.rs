@@ -49,6 +49,8 @@ pub struct Board {
     autoconfig_done: bool,
     /// A590/A2091 SCSI controller, if fitted (configured after the fast RAM).
     pub scsi: Option<A2091>,
+    /// Gayle gate array with IDE (A600/A1200).
+    pub gayle: Option<crate::gayle::Gayle>,
     scsi_ac_done: bool,
     pub rom: Vec<u8>,
     /// Extension ROM at $E00000 (AROS, CD32, CDTV).
@@ -168,6 +170,7 @@ impl Board {
             fast_base: None,
             autoconfig_done: false,
             scsi: None,
+            gayle: matches!(cfg.model, crate::config::Model::A600 | crate::config::Model::A1200).then(crate::gayle::Gayle::new),
             scsi_ac_done: false,
             rom,
             rom_mask,
@@ -308,6 +311,9 @@ impl Board {
         self.scsi_ac_done = false;
         if let Some(s) = self.scsi.as_mut() {
             s.reset();
+        }
+        if let Some(g) = self.gayle.as_mut() {
+            g.reset();
         }
     }
 
@@ -791,7 +797,7 @@ impl Board {
 
     fn update_cia_irq(&mut self) {
         // Expansion boards share Paula's INT2 input with CIA-A.
-        if self.cia_a.irq() || self.scsi.as_ref().is_some_and(|s| s.irq()) {
+        if self.cia_a.irq() || self.scsi.as_ref().is_some_and(|s| s.irq()) || self.gayle.as_ref().is_some_and(|g| g.irq()) {
             self.intreq |= int::PORTS;
         }
         if self.cia_b.irq() {
@@ -1319,6 +1325,7 @@ enum Region {
     Cia,
     Autoconfig,
     Scsi(u32),
+    Gayle,
     None,
 }
 
@@ -1352,6 +1359,7 @@ impl Board {
                 }
             }
             0xdf => Region::Custom,
+            0xd8..=0xdb | 0xde if self.gayle.is_some() => Region::Gayle,
             0xe8 => Region::Autoconfig,
             0xe9..=0xef if self.scsi.as_ref().and_then(|s| s.contains(a)).is_some() => {
                 Region::Scsi(self.scsi.as_ref().unwrap().contains(a).unwrap())
@@ -1409,6 +1417,12 @@ impl Bus for Board {
                 self.cycles += 4;
                 self.autoconfig_read(addr)
             }
+            Region::Gayle => {
+                self.cycles += 4;
+                let v = self.gayle.as_mut().unwrap().read8(addr);
+                self.update_cia_irq();
+                v
+            }
             Region::Scsi(o) => {
                 self.cycles += 4;
                 let now = self.cycles;
@@ -1461,6 +1475,12 @@ impl Bus for Board {
                 self.cycles += 4;
                 (self.autoconfig_read(addr) as u16) << 8 | 0xff
             }
+            Region::Gayle => {
+                self.cycles += 4;
+                let v = self.gayle.as_mut().unwrap().read16(addr);
+                self.update_cia_irq();
+                v
+            }
             Region::Scsi(o) => {
                 self.cycles += 4;
                 let now = self.cycles;
@@ -1506,6 +1526,11 @@ impl Bus for Board {
                 self.cycles += 4;
                 self.autoconfig_write(addr, v);
             }
+            Region::Gayle => {
+                self.cycles += 4;
+                self.gayle.as_mut().unwrap().write8(addr, v);
+                self.update_cia_irq();
+            }
             Region::Scsi(o) => {
                 self.cycles += 4;
                 let now = self.cycles;
@@ -1546,6 +1571,11 @@ impl Bus for Board {
             Region::Autoconfig => {
                 self.cycles += 4;
                 self.autoconfig_write(addr, (v >> 8) as u8);
+            }
+            Region::Gayle => {
+                self.cycles += 4;
+                self.gayle.as_mut().unwrap().write16(addr, v);
+                self.update_cia_irq();
             }
             Region::Scsi(o) => {
                 self.cycles += 4;

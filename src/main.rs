@@ -297,7 +297,22 @@ fn main() {
     }
 
     let mut amiga = Amiga::new(cfg, rom.data);
-    if !hdfs.is_empty() {
+    if !hdfs.is_empty() && amiga.board.gayle.is_some() {
+        // A600/A1200: the internal IDE port takes a master and a slave.
+        if hdfs.len() > 2 {
+            die("the A600/A1200 IDE port takes at most 2 hard disks");
+        }
+        let n = hdfs.len();
+        let g = amiga.board.gayle.as_mut().unwrap();
+        for (i, (name, data, _ro)) in hdfs.into_iter().enumerate() {
+            log::info!("IDE {}: {name} ({} KB)", if i == 0 { "master" } else { "slave" }, data.len() / 1024);
+            let mut d = amiga::a2091::HardDisk::new(name.clone(), data, false);
+            if i + 1 < n {
+                d.clear_rdb_last_flags();
+            }
+            g.drives[i] = Some(amiga::gayle::AtaDrive::new(name, d.data));
+        }
+    } else if !hdfs.is_empty() {
         if hdfs.len() > 7 {
             die("at most 7 hard disks are supported");
         }

@@ -7,6 +7,7 @@ pub mod config;
 pub mod cpu;
 pub mod disasm;
 pub mod floppy;
+pub mod gayle;
 pub mod keyboard;
 pub mod rom;
 pub mod rp9;
