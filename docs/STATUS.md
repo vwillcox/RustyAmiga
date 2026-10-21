@@ -66,9 +66,12 @@ Aerial Racers, AmiBee and Overdose set DIWSTRT to `$0081`, a vertical start of l
 
 Paula also now finishes the current word when a channel's DMA is switched off, then requests an interrupt unless one is pending, as in the HRM state diagram. Sound drivers wait for that interrupt after stopping a channel.
 
+### JIT packages
+59 RP9s ask for UAE's JIT, so the demos expect far more CPU than a real 68030/040. Those packages now get an adaptive CPU speed in the window: every 25 frames the multiplier rises by 25% while emulation uses under 60% of the frame time, and drops by 20% above 85%. It never goes below the model default and is shown in the title bar. Headless runs use a fixed 32x so test results are repeatable. `--cpu-speed` overrides both. This fixed Concrete, Lux Aeterna Luceat Eis, Psylteflesk, Tour de Scene, The Chronicles of Professor Arronax, Multiverse and Lapsuus, which only looked blank because they were still precalculating.
+
 ### Remaining open items
-- **No picture within 90 s:** Concrete, HOG, Lux Aeterna Luceat Eis, Mental, Psylteflesk, Tour de Scene and The Chronicles of Professor Arronax (A4000).
-- **Still precalculating at 90 s:** Incision, Lapsuus, Multiverse and The Castle.
+- **Mental** (Push Entertainment) shows a garbled picture in a small area.
+- **Still precalculating at 90 s:** Incision (JIT), and The Castle (speed="max" without JIT, so 8x).
 - **Not emulated:** CD32/CDTV, PowerPC boards, and Amiga Forever host-folder drives (A4000 Enhanced, AROS, Walker).
 - **Not Amiga software:** the Videos and Gallery packages (DVD video and host images for Amiga Forever's player). The emulator now refuses them with that explanation.
 

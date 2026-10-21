@@ -328,8 +328,19 @@ fn main() {
     if rp9.as_ref().is_some_and(|r| r.cpu_max) {
         cfg.cpu_speed = cfg.cpu_speed.max(8.0);
     }
+    if rp9.as_ref().is_some_and(|r| r.jit) {
+        // Demos written for a JIT expect far more CPU than a real 68030/040. The
+        // window adapts the speed to the host; headless runs use a fixed value
+        // so that results are repeatable.
+        if args.headless {
+            cfg.cpu_speed = cfg.cpu_speed.max(32.0);
+        } else {
+            cfg.cpu_speed_adaptive = true;
+        }
+    }
     if let Some(sp) = args.cpu_speed {
         cfg.cpu_speed = sp.clamp(1.0, 64.0);
+        cfg.cpu_speed_adaptive = false;
     }
     if let Some(c) = args.cpu.clone().or_else(|| rp9.as_ref().and_then(|r| r.cpu.clone())) {
         use amiga::cpu::{CpuModel, FpuModel};

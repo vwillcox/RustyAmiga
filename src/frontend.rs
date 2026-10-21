@@ -68,7 +68,14 @@ struct App {
     /// Hard disk activity counter last seen, and the frame it last changed.
     hd_seen: u64,
     hd_changed: u64,
+    /// Adaptive CPU speed: the lowest multiplier allowed, and the time spent
+    /// emulating since the last adjustment.
+    speed_floor: Option<f32>,
+    busy: Duration,
 }
+
+/// Frames between adaptive CPU speed adjustments.
+const SPEED_PERIOD: u64 = 25;
 
 const HELP: &str = "\
 Host keys:
@@ -270,6 +277,9 @@ impl App {
             if self.warp {
                 t.push_str(" [warp]");
             }
+            if self.speed_floor.is_some() {
+                t.push_str(&format!(" [CPU x{:.0}]", self.amiga.board.cfg.cpu_speed));
+            }
             w.set_title(&t);
         }
     }
@@ -334,7 +344,9 @@ impl App {
 
     fn emulate_frame(&mut self) {
         self.poll_gamepads();
+        let t = Instant::now();
         self.amiga.run_frame();
+        self.busy += t.elapsed();
         let samples = self.amiga.board.take_audio();
         if let Some((_, buf, rate)) = &self.audio {
             let mut q = buf.lock().unwrap();
@@ -348,6 +360,9 @@ impl App {
             }
         }
         self.tick += 1;
+        if self.tick % SPEED_PERIOD == 0 {
+            self.adapt_speed();
+        }
         if let Some(n) = self.amiga.board.leds().hd {
             if n != self.hd_seen {
                 self.hd_seen = n;
@@ -359,6 +374,31 @@ impl App {
             log::debug!("{:.1} fps", self.fps_count as f64 / self.fps_time.elapsed().as_secs_f64());
             self.fps_count = 0;
             self.fps_time = Instant::now();
+        }
+    }
+
+    /// Like a JIT core, run the CPU as fast as the host allows: speed up while
+    /// emulation uses well under the frame time, and back off when it gets close.
+    fn adapt_speed(&mut self) {
+        let busy = std::mem::take(&mut self.busy);
+        let Some(floor) = self.speed_floor else { return };
+        if self.warp {
+            return;
+        }
+        let load = busy.as_secs_f64() / (self.frame_time.as_secs_f64() * SPEED_PERIOD as f64);
+        let speed = self.amiga.board.cfg.cpu_speed;
+        let new = if load < 0.6 {
+            speed * 1.25
+        } else if load > 0.85 {
+            speed * 0.8
+        } else {
+            speed
+        };
+        let new = new.clamp(floor, 64.0);
+        if new != speed {
+            self.amiga.board.set_cpu_speed(new);
+            log::debug!("CPU speed x{new:.1} (load {:.0}%)", load * 100.0);
+            self.update_title();
         }
     }
 
@@ -524,6 +564,7 @@ pub fn run(mut amiga: Amiga, opts: Options) {
         Some((_, _, rate)) => amiga.board.audio.set_sample_rate(*rate),
         None => log::warn!("no audio output available"),
     }
+    let speed_floor = amiga.board.cfg.cpu_speed_adaptive.then_some(amiga.board.cfg.cpu_speed);
     let fps = if amiga.board.cfg.ntsc { 59.94 } else { 50.0 };
     let gilrs = gilrs::Gilrs::new().ok();
     let mut app = App {
@@ -544,6 +585,8 @@ pub fn run(mut amiga: Amiga, opts: Options) {
         tick: 0,
         hd_seen: 0,
         hd_changed: 0,
+        speed_floor,
+        busy: Duration::ZERO,
     };
     let el = EventLoop::new().expect("event loop");
     el.run_app(&mut app).expect("run event loop");

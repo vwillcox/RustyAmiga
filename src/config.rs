@@ -70,6 +70,8 @@ pub struct Config {
     pub fpu: crate::cpu::FpuModel,
     /// CPU speed as a multiple of a 7 MHz 68000 (for non-chip-bus work).
     pub cpu_speed: f32,
+    /// Raise `cpu_speed` while the host keeps up (windowed mode), like a JIT core.
+    pub cpu_speed_adaptive: bool,
     pub ntsc: bool,
     pub turbo_floppy: bool,
     pub drives: usize,
@@ -101,6 +103,7 @@ impl Config {
                 Model::A3000 | Model::A4000 => 4.0,
                 _ => 1.0,
             },
+            cpu_speed_adaptive: false,
             ntsc: false,
             turbo_floppy: false,
             drives: 1,

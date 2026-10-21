@@ -17,6 +17,8 @@ pub struct Rp9 {
     pub fpu: Option<String>,
     /// The package asks for the fastest CPU emulation (speed="max").
     pub cpu_max: bool,
+    /// The package was authored for a JIT CPU core, i.e. a CPU as fast as the host allows.
+    pub jit: bool,
     pub system: String,
     pub system_rom: Option<u32>,
     pub fast_ram: u32,
@@ -165,8 +167,10 @@ fn parse_manifest(xml: &str) -> Rp9 {
         if text == "turbo-floppy" {
             rp.turbo_floppy = true;
         }
+        rp.jit |= text == "jit";
     }
     for (attrs, text) in tag_text(xml, "peripheral") {
+        rp.jit |= text == "jit";
         if text == "fpu" {
             rp.fpu = attr(attrs, "type").map(str::to_string);
             continue;

@@ -304,6 +304,12 @@ impl Board {
         self.cfg.model.chipset() == Chipset::Ocs
     }
 
+    /// Change the CPU speed multiplier while running.
+    pub fn set_cpu_speed(&mut self, speed: f32) {
+        self.cfg.cpu_speed = speed.clamp(1.0, 64.0);
+        self.cpu_mult16 = ((self.cfg.cpu_speed * 16.0) as u32).max(16);
+    }
+
     /// Account for `n` CPU clocks that do not touch the chip bus.
     #[inline]
     fn cpu_cycles(&mut self, n: u32) {
