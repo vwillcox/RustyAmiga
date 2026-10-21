@@ -84,6 +84,8 @@ pub struct Board {
     /// CPU clock (7.09 MHz PAL); the chipset runs at half this rate.
     pub cycles: u64,
     pub cck: u64,
+    /// Last word on the custom chip bus (read back from write-only registers).
+    last_custom: u16,
     /// Interrupt level the CPU sees, and the level Paula is changing to (since `ipl_since`).
     ipl_out: u8,
     ipl_pending: u8,
@@ -220,6 +222,7 @@ impl Board {
             overlay: true,
             cycles: 0,
             cck: 0,
+            last_custom: 0xffff,
             ipl_out: 0,
             ipl_pending: 0,
             ipl_since: 0,
@@ -1000,6 +1003,12 @@ impl Board {
     // ---- custom registers ----------------------------------------------------
 
     pub fn custom_read(&mut self, reg: u16) -> u16 {
+        let v = self.custom_read_reg(reg);
+        self.last_custom = v;
+        v
+    }
+
+    fn custom_read_reg(&mut self, reg: u16) -> u16 {
         match reg & 0x1fe {
             0x000 => self.blitter.ddat,
             0x002 => {
@@ -1075,7 +1084,9 @@ impl Board {
                 Chipset::Ecs => 0xfffc,
                 Chipset::Aga => 0x00f8,
             },
-            _ => 0xffff,
+            // Write-only and unused registers return whatever was last on the
+            // chip bus. Dr. Mario keeps its random number seed in BPL7PTL.
+            _ => self.last_custom,
         }
     }
 
@@ -1093,6 +1104,7 @@ impl Board {
 
     pub fn custom_write_reg(&mut self, reg: u16, v: u16) {
         let reg = reg & 0x1fe;
+        self.last_custom = v;
         match reg {
             0x020 => self.dskpt = (self.dskpt & 0xffff) | (v as u32) << 16,
             0x022 => self.dskpt = (self.dskpt & 0xffff_0000) | (v & 0xfffe) as u32,
