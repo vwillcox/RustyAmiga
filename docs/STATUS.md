@@ -84,7 +84,7 @@ Amiga Forever ships AROS and the enhanced OS 3.X installation as plain folders (
 The CD32 model has Akiko at `$B80000` (`src/akiko.rs`): the chip ID, the chunky-to-planar converter, and the I2C settings NVRAM (a 24C08, kept in memory). The extended ROM loads automatically. Without a CD drive the machine boots to its "Amiga CD32" disc animation. The Amiga Forever DVD has no CD images to test a drive with.
 
 ### Remaining open items
-- **Incision still precalculates at 90 s.** It renders its soundtrack first; at 64x this finishes around frame 7500.
+- **Incision works but precalculates for a long time.** It renders its soundtrack first; at 64x the intro starts by frame 9000.
 - **Not emulated:** the CD32's CD-ROM drive, the CDTV, PowerPC boards, UAE's RTG card (uaegfx), and the user's own shared folder (`<harddrive root="shared"/>`, which is skipped). The Walker prototype's folders are not on the AF 11 DVD.
 - **Not Amiga software:** the Videos and Gallery packages (DVD video and host images for Amiga Forever's player). The emulator now refuses them with that explanation.
 
