@@ -80,9 +80,12 @@ Amiga Forever ships AROS and the enhanced OS 3.X installation as plain folders (
 - **Amiga 4000 Enhanced 3.X** boots the 3.X ROM from System with Work as DH1. It first shows "uaegfx.card could not be opened" (no RTG card); after OK (`--type 1000:\Av` headless), Workbench comes up on AGA.
 - **AROS** boots from its folder to Wanderer on an A4000 given 16 MB motherboard and 64 MB Zorro III RAM. With the default 4 MB, its stacks ended up in chip RAM, and remapping its true-colour images for AGA took minutes.
 
+### CD32 (no CD drive yet)
+The CD32 model has Akiko at `$B80000` (`src/akiko.rs`): the chip ID, the chunky-to-planar converter, and the I2C settings NVRAM (a 24C08, kept in memory). The extended ROM loads automatically. Without a CD drive the machine boots to its "Amiga CD32" disc animation. The Amiga Forever DVD has no CD images to test a drive with.
+
 ### Remaining open items
 - **Incision still precalculates at 90 s.** It renders its soundtrack first; at 64x this finishes around frame 7500.
-- **Not emulated:** CD32/CDTV, PowerPC boards, UAE's RTG card (uaegfx), and the user's own shared folder (`<harddrive root="shared"/>`, which is skipped). The Walker prototype's folders are not on the AF 11 DVD.
+- **Not emulated:** the CD32's CD-ROM drive, the CDTV, PowerPC boards, UAE's RTG card (uaegfx), and the user's own shared folder (`<harddrive root="shared"/>`, which is skipped). The Walker prototype's folders are not on the AF 11 DVD.
 - **Not Amiga software:** the Videos and Gallery packages (DVD video and host images for Amiga Forever's player). The emulator now refuses them with that explanation.
 
 ## Known issues and open items
@@ -102,4 +105,4 @@ Amiga Forever ships AROS and the enhanced OS 3.X installation as plain folders (
 ## Next milestones
 
 1. A3000 polish (the SDMAC works; nothing beyond booting is tested).
-2. The remaining blank AGA titles; CD32/CDTV.
+2. CD32 CD-ROM drive (Akiko's CD controller, ISO/CUE images) and the CD32 joypad; CDTV.

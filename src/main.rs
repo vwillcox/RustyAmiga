@@ -478,10 +478,11 @@ fn main() {
     }
     amiga.board.audio.stereo_separation = args.stereo_separation.clamp(0.0, 1.0);
     let ext = args.ext_rom.clone().or_else(|| {
-        // AROS ships its kernel split across a main and an extension ROM.
+        // AROS ships its kernel split across a main and an extension ROM, and
+        // the CD32 has an extended ROM with its CD player and boot animation.
         let name = rom_path.file_name()?.to_str()?;
         let ext = rom_path.with_file_name(name.replace(".rom", "-ext.rom"));
-        (name.starts_with("aros") && ext.is_file()).then_some(ext)
+        ((name.starts_with("aros") || name.contains("-cd32")) && ext.is_file()).then_some(ext)
     });
     if let Some(p) = ext {
         let data = std::fs::read(&p).unwrap_or_else(|e| die(format!("{}: {e}", p.display())));

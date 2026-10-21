@@ -68,6 +68,8 @@ pub struct Board {
     pub scsi: Option<A2091>,
     /// Gayle gate array with IDE (A600/A1200).
     pub gayle: Option<crate::gayle::Gayle>,
+    /// CD32 only.
+    pub akiko: Option<crate::akiko::Akiko>,
     scsi_ac_done: bool,
     pub rom: Vec<u8>,
     /// Extension ROM at $E00000 (AROS, CD32, CDTV).
@@ -202,6 +204,7 @@ impl Board {
                 crate::config::Model::A4000 => Some(crate::gayle::Gayle::new_a4000()),
                 _ => None,
             },
+            akiko: (cfg.model == crate::config::Model::Cd32).then(crate::akiko::Akiko::new),
             scsi_ac_done: false,
             rom,
             rom_mask,
@@ -1511,6 +1514,7 @@ enum Region {
     Mb(usize),
     Z3(usize),
     Ramsey,
+    Akiko,
     None,
 }
 
@@ -1533,6 +1537,7 @@ impl Board {
                 Some(o) => Region::Fast(o),
                 None => Region::None,
             },
+            0xb8 if self.akiko.is_some() => Region::Akiko,
             0xa0..=0xbf => Region::Cia,
             0xc0..=0xd7 => {
                 let off = (a - 0xc0_0000) as usize;
@@ -1619,6 +1624,10 @@ impl Bus for Board {
                 self.cpu_cycles(4);
                 self.ramsey_read(addr)
             }
+            Region::Akiko => {
+                self.cpu_cycles(4);
+                self.akiko.as_mut().map_or(0, |a| a.read8(addr))
+            }
             Region::Rom(o) => {
                 self.cpu_cycles(4);
                 self.rom[o]
@@ -1703,6 +1712,11 @@ impl Bus for Board {
                 self.cpu_cycles(4);
                 (self.ramsey_read(addr) as u16) << 8 | self.ramsey_read(addr + 1) as u16
             }
+            Region::Akiko => {
+                self.cpu_cycles(4);
+                let a = self.akiko.as_mut().unwrap();
+                (a.read8(addr) as u16) << 8 | a.read8(addr + 1) as u16
+            }
             Region::Rom(o) => {
                 self.cpu_cycles(4);
                 (self.rom[o] as u16) << 8 | self.rom[o + 1] as u16
@@ -1776,6 +1790,12 @@ impl Bus for Board {
                 self.cpu_cycles(4);
                 self.ramsey_write(addr, v);
             }
+            Region::Akiko => {
+                self.cpu_cycles(4);
+                if let Some(a) = self.akiko.as_mut() {
+                    a.write8(addr, v);
+                }
+            }
             Region::Custom => {
                 self.chip_access();
                 // The 68000 puts the byte on both halves of the data bus.
@@ -1842,6 +1862,13 @@ impl Bus for Board {
                 self.cpu_cycles(4);
                 self.ramsey_write(addr, (v >> 8) as u8);
                 self.ramsey_write(addr + 1, v as u8);
+            }
+            Region::Akiko => {
+                self.cpu_cycles(4);
+                if let Some(a) = self.akiko.as_mut() {
+                    a.write8(addr, (v >> 8) as u8);
+                    a.write8(addr + 1, v as u8);
+                }
             }
             Region::Custom => {
                 self.chip_access();

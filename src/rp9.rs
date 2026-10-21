@@ -283,7 +283,8 @@ impl Rp9 {
     pub fn unsupported_reason(&self) -> Option<String> {
         match self.model() {
             None => return Some(format!("unknown system {}", self.system)),
-            Some(Model::Cd32) => return Some("the CD32 (CD-ROM drive and Akiko) is not emulated yet".into()),
+            // Without a disc the CD32 shows its own start-up animation.
+            Some(Model::Cd32) => return None,
             Some(m) if !m.supported() => return Some(format!("{m:?} is not emulated yet")),
             _ => {}
         }

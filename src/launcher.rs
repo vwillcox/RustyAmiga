@@ -148,7 +148,7 @@ const MODELS: &[(Model, &str)] = &[
     (Model::A1200, "Amiga 1200"),
     (Model::A3000, "Amiga 3000"),
     (Model::A4000, "Amiga 4000"),
-    (Model::Cd32, "CD32 (coming: 68020/AGA/CD)"),
+    (Model::Cd32, "CD32 (no CD drive yet)"),
 ];
 
 fn model_name(m: Model) -> &'static str {
