@@ -75,6 +75,8 @@ pub struct Denise {
     pub clxdat: u16,
     pub diwstrt: u16,
     pub diwstop: u16,
+    /// ECS/AGA DIWHIGH, until the next DIWSTRT/DIWSTOP write.
+    pub diwhigh: Option<u16>,
     /// Sprite shift register width in bits (AGA FMODE).
     pub spr_width: u32,
 
@@ -131,6 +133,7 @@ impl Denise {
             clxdat: 0,
             diwstrt: 0,
             diwstop: 0,
+            diwhigh: None,
             spr_width: 16,
             planes: vec![0; LINE_W + 256],
             events: Vec::with_capacity(256),
@@ -355,8 +358,13 @@ impl Denise {
         let mut spr = self.line_spr;
         let mut ev = 0usize;
 
-        let hstart = (self.diwstrt & 0xff) as usize;
-        let hstop = (self.diwstop & 0xff) as usize | 0x100;
+        // Without DIWHIGH, H8 is 0 for the start and 1 for the stop.
+        let (h8_start, h8_stop) = match self.diwhigh {
+            Some(hi) => (hi & 0x20 != 0, hi & 0x2000 != 0),
+            None => (false, true),
+        };
+        let hstart = (self.diwstrt & 0xff) as usize | if h8_start { 0x100 } else { 0 };
+        let hstop = (self.diwstop & 0xff) as usize | if h8_stop { 0x100 } else { 0 };
 
         // Sprite resolution: hires pixels per sprite pixel (AGA SPRES).
         let spr_pw: u8 = if self.aga && matches!((self.bplcon3 >> 6) & 3, 2 | 3) { 1 } else { 2 };
@@ -417,7 +425,10 @@ impl Denise {
             }
 
             let xl = x >> 1;
-            let inside = vdiw && xl >= hstart && xl < hstop;
+            // The window is a flip-flop: a stop position left of the start is only
+            // reached on the next line, so the window runs to the end of this one.
+            let inside = vdiw
+                && if hstop > hstart { xl >= hstart && xl < hstop } else { xl >= hstart || xl < hstop };
             let nplanes = self.display_planes(bplcon0);
             let pf = if inside { self.planes[x] & ((1u16 << nplanes) - 1) as u8 } else { 0 };
 

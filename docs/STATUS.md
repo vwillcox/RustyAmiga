@@ -69,8 +69,11 @@ Paula also now finishes the current word when a channel's DMA is switched off, t
 ### JIT packages
 59 RP9s ask for UAE's JIT, so the demos expect far more CPU than a real 68030/040. Those packages now get an adaptive CPU speed in the window: every 25 frames the multiplier rises by 25% while emulation uses under 60% of the frame time, and drops by 20% above 85%. It never goes below the model default and is shown in the title bar. Headless runs use a fixed 32x so test results are repeatable. `--cpu-speed` overrides both. This fixed Concrete, Lux Aeterna Luceat Eis, Psylteflesk, Tour de Scene, The Chronicles of Professor Arronax, Multiverse and Lapsuus, which only looked blank because they were still precalculating.
 
+### DIWHIGH horizontal bits and BSCAN2
+- Denise now takes the horizontal H8 bits from DIWHIGH. A stop position left of the start (Mental's `$00A`) keeps the window open to the end of the line, because the window is a flip-flop.
+- AGA BSCAN2 (FMODE bit 14) scan doubling: every plane adds BPL1MOD and BPL2MOD on alternate lines, with the parity counted from the DIWSTRT line. Mental, Goa, Lapsuus, Ocean Machine, Burning Chrome, Under Pressure and Sumea use it and showed vertical streaks or garbage. Fatman's title picture is no longer cut off.
+
 ### Remaining open items
-- **Mental** (Push Entertainment) shows a garbled picture in a small area.
 - **Still precalculating at 90 s:** Incision (JIT), and The Castle (speed="max" without JIT, so 8x).
 - **Not emulated:** CD32/CDTV, PowerPC boards, and Amiga Forever host-folder drives (A4000 Enhanced, AROS, Walker).
 - **Not Amiga software:** the Videos and Gallery packages (DVD video and host images for Amiga Forever's player). The emulator now refuses them with that explanation.

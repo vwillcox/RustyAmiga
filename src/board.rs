@@ -498,8 +498,17 @@ impl Board {
         }
         if h == self.fetch_end && self.vdiw && self.dmacon & (dma::BPL | dma::MASTER) == (dma::BPL | dma::MASTER) {
             let n = self.denise.nplanes(self.denise.bplcon0);
+            // AGA BSCAN2 (scan doubling): every plane takes BPL1MOD and BPL2MOD on
+            // alternate lines, counted from the window start line, instead of
+            // odd planes BPL1MOD and even planes BPL2MOD.
+            let (m1, m2) = if self.aga() && self.fmode & 0x4000 != 0 {
+                let m = if ((self.diwstrt >> 8) ^ self.vpos) & 1 != 0 { self.bpl2mod } else { self.bpl1mod };
+                (m, m)
+            } else {
+                (self.bpl1mod, self.bpl2mod)
+            };
             for p in 0..n {
-                let m = if p & 1 == 0 { self.bpl1mod } else { self.bpl2mod };
+                let m = if p & 1 == 0 { m1 } else { m2 };
                 self.bplpt[p] = self.bplpt[p].wrapping_add(m as i32 as u32);
             }
         }
@@ -1129,11 +1138,13 @@ impl Board {
             }
             0x08e => {
                 self.diwhigh = None;
+                self.denise.diwhigh = None;
                 self.diwstrt = v;
                 self.denise.diwstrt = v;
             }
             0x090 => {
                 self.diwhigh = None;
+                self.denise.diwhigh = None;
                 self.diwstop = v;
                 self.denise.diwstop = v;
             }
@@ -1205,7 +1216,10 @@ impl Board {
                 self.update_fetch_window();
             }
             0x1dc if !self.ocs() => self.pal = v & 0x20 != 0,
-            0x1e4 if !self.ocs() => self.diwhigh = Some(v),
+            0x1e4 if !self.ocs() => {
+                self.diwhigh = Some(v);
+                self.denise.diwhigh = Some(v);
+            }
             0x108 => self.bpl1mod = (v & 0xfffe) as i16,
             0x10a => self.bpl2mod = (v & 0xfffe) as i16,
             0x110..=0x11e if reg < 0x11c || self.aga() => {
@@ -1453,10 +1467,11 @@ impl Board {
 
     pub fn debug_state(&self) -> String {
         format!(
-            "bplcon0={:04x} bplcon1={:04x} bplcon2={:04x} ddf={:02x}-{:02x} fetch={:02x}-{:02x} diw={:04x}-{:04x} mod={}/{} dmacon={:04x} intena={:04x} intreq={:04x} cop1lc={:06x}",
+            "bplcon0={:04x} bplcon1={:04x} bplcon2={:04x} ddf={:02x}-{:02x} fetch={:02x}-{:02x} diw={:04x}-{:04x} mod={}/{} dmacon={:04x} intena={:04x} intreq={:04x} cop1lc={:06x} cop2lc={:06x} fmode={:04x} bplcon3={:04x} bplcon4={:04x}",
             self.denise.bplcon0, self.denise.bplcon1, self.denise.bplcon2, self.ddfstrt, self.ddfstop,
             self.fetch_start, self.fetch_end, self.diwstrt, self.diwstop, self.bpl1mod, self.bpl2mod,
-            self.dmacon, self.intena, self.intreq, self.cop1lc
+            self.dmacon, self.intena, self.intreq, self.cop1lc, self.cop2lc, self.fmode,
+            self.denise.bplcon3, self.denise.bplcon4
         )
     }
 
