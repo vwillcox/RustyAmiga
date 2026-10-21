@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <!-- A tilted red and white checkerboard, wrapped on a sphere by shading. -->
+    <pattern id="check" width="32" height="32" patternUnits="userSpaceOnUse" patternTransform="rotate(-18 64 64) scale(0.62)">
+      <rect width="32" height="32" fill="#f4f4f4"/>
+      <rect width="16" height="16" fill="#d81e1e"/>
+      <rect x="16" y="16" width="16" height="16" fill="#d81e1e"/>
+    </pattern>
+    <radialGradient id="shade" cx="40%" cy="34%" r="70%">
+      <stop offset="0" stop-color="#fff" stop-opacity="0.55"/>
+      <stop offset="0.35" stop-color="#fff" stop-opacity="0"/>
+      <stop offset="0.8" stop-color="#000" stop-opacity="0.25"/>
+      <stop offset="1" stop-color="#000" stop-opacity="0.6"/>
+    </radialGradient>
+    <radialGradient id="floor" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#000" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#000" stop-opacity="0"/>
+    </radialGradient>
+    <clipPath id="ball">
+      <circle cx="64" cy="58" r="50"/>
+    </clipPath>
+  </defs>
+  <ellipse cx="68" cy="116" rx="44" ry="8" fill="url(#floor)"/>
+  <g clip-path="url(#ball)">
+    <!-- Squeeze the pattern towards the edges to suggest curvature. -->
+    <rect x="0" y="0" width="128" height="128" fill="url(#check)" transform="translate(64 58) scale(1.08 1) translate(-64 -58)"/>
+    <circle cx="64" cy="58" r="50" fill="url(#shade)"/>
+  </g>
+  <circle cx="64" cy="58" r="50" fill="none" stroke="#5a0a0a" stroke-opacity="0.5" stroke-width="1.5"/>
+</svg>

@@ -77,6 +77,9 @@ struct App {
 /// Frames between adaptive CPU speed adjustments.
 const SPEED_PERIOD: u64 = 25;
 
+/// Wayland app id / X11 class, matching the desktop entry.
+pub const APP_ID: &str = "amiga-emulator";
+
 const HELP: &str = "\
 Host keys:
   click window  capture mouse        F12        release mouse
@@ -432,6 +435,13 @@ impl ApplicationHandler for App {
             .with_title("Amiga")
             .with_inner_size(LogicalSize::new(FB_W as f64 * 1.5, (FB_H + amiga::panel::PANEL_H) as f64 * 1.5))
             .with_min_inner_size(LogicalSize::new(FB_W as f64 / 2.0, (FB_H + amiga::panel::PANEL_H) as f64 / 2.0));
+        // The app id the desktop entry names (StartupWMClass), so the window
+        // gets its icon and groups with the launcher.
+        #[cfg(target_os = "linux")]
+        let attrs = {
+            use winit::platform::wayland::WindowAttributesExtWayland;
+            WindowAttributesExtWayland::with_name(attrs, APP_ID, "")
+        };
         let window = Arc::new(el.create_window(attrs).expect("create window"));
         let size = window.inner_size();
         let surface = SurfaceTexture::new(size.width, size.height, window.clone());

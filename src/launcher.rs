@@ -784,7 +784,10 @@ impl eframe::App for App {
 
 pub fn run() {
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1100.0, 760.0]).with_title("Amiga Launcher"),
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1100.0, 760.0])
+            .with_title("Amiga Launcher")
+            .with_app_id(crate::frontend::APP_ID),
         ..Default::default()
     };
     if let Err(e) = eframe::run_native("Amiga Launcher", options, Box::new(|_cc| Ok(Box::new(App::new())))) {
