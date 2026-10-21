@@ -507,7 +507,7 @@ impl Board {
         let aud_en = if self.dmacon & dma::MASTER != 0 { (self.dmacon & dma::AUD) as u8 } else { 0 };
         let irq = {
             let mut mem = (&self.chip, self.chip_mask);
-            self.audio.tick(&mut mem, aud_en, self.adkcon)
+            self.audio.tick(&mut mem, aud_en, self.adkcon, (self.intreq >> 7) as u8 & 0xf)
         };
         if irq != 0 {
             self.intreq |= (irq as u16) << 7;
@@ -577,14 +577,13 @@ impl Board {
             Some(hi) => ((self.diwstrt >> 8) | (hi & 7) << 8, (self.diwstop >> 8) | ((hi >> 8) & 7) << 8),
             None => (self.diwstrt >> 8, (self.diwstop >> 8) | if self.diwstop & 0x8000 == 0 { 0x100 } else { 0 }),
         };
+        // The window closes at the end of every field, but (except on the A1000's
+        // Agnus) a start line of 0 opens it again at once.
+        if self.vpos == 0 || self.vpos == vstop {
+            self.vdiw = false;
+        }
         if self.vpos == vstart {
             self.vdiw = true;
-        }
-        if self.vpos == vstop {
-            self.vdiw = false;
-        }
-        if self.vpos == 0 {
-            self.vdiw = false;
         }
         if self.vpos == SPRITE_FIRST_LINE {
             self.spr_need_ctl = [true; 8];

@@ -25,6 +25,8 @@ pub struct Channel {
     pub out: i8,
     dma: bool,
     manual: bool,
+    /// A CPU write to AUDxDAT started manual output: request the next word.
+    dat_irq: bool,
     /// Toggles between volume and period words when modulating both.
     mod_toggle: bool,
 }
@@ -168,13 +170,14 @@ impl Audio {
             c.buf = v;
             c.low_byte_next = false;
             c.per_cnt = 0;
+            c.dat_irq = true;
         }
     }
 
     /// Advance one colour clock. `dma_en` holds the AUDxEN bits (already ANDed
-    /// with DMAEN), `adkcon` the modulation bits. Returns channels requesting an
-    /// interrupt.
-    pub fn tick<M: AudioMem>(&mut self, mem: &mut M, dma_en: u8, adkcon: u16) -> u8 {
+    /// with DMAEN), `adkcon` the modulation bits and `pending` the AUDxIP bits of
+    /// INTREQ. Returns channels requesting an interrupt.
+    pub fn tick<M: AudioMem>(&mut self, mem: &mut M, dma_en: u8, adkcon: u16, pending: u8) -> u8 {
         let mut irq = 0u8;
         for i in 0..4 {
             let en = dma_en & (1 << i) != 0;
@@ -185,6 +188,7 @@ impl Audio {
                 c.pt = c.lc;
                 c.len_cnt = if c.len == 0 { 0x10000 } else { c.len as u32 };
                 c.buf = mem.fetch(c.pt);
+                c.dat = c.buf;
                 c.pt = c.pt.wrapping_add(2);
                 c.len_cnt -= 1;
                 if c.len_cnt == 0 {
@@ -195,8 +199,18 @@ impl Audio {
                 c.per_cnt = 0;
                 irq |= 1 << i;
             } else if !en && c.dma {
-                // DMA off: the state machine idles; the DAC keeps its last level.
+                // DMA off: the current word finishes, then the channel carries on
+                // as if under CPU control: it asks for more data with an interrupt
+                // unless one is already pending, in which case it idles. Sound
+                // drivers wait for that interrupt after stopping a channel.
                 c.dma = false;
+                c.manual = true;
+            }
+            if c.dat_irq {
+                c.dat_irq = false;
+                if pending & (1 << i) == 0 {
+                    irq |= 1 << i;
+                }
             }
             if !c.dma && !c.manual {
                 continue;
@@ -239,6 +253,7 @@ impl Audio {
                 let c = &mut self.ch[i];
                 if c.dma {
                     c.buf = mem.fetch(c.pt);
+                    c.dat = c.buf;
                     c.pt = c.pt.wrapping_add(2);
                     c.len_cnt -= 1;
                     if c.len_cnt == 0 {
@@ -246,6 +261,9 @@ impl Audio {
                         c.len_cnt = if c.len == 0 { 0x10000 } else { c.len as u32 };
                         irq |= 1 << i;
                     }
+                } else if pending & (1 << i) != 0 {
+                    // The last request is still unanswered: idle, keeping the DAC level.
+                    c.manual = false;
                 } else {
                     // Manual mode: ask the CPU for more data.
                     c.buf = c.dat;

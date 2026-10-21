@@ -61,8 +61,13 @@ Drives report their ID on /RDY while the motor is off (disk.resource reads a 1 w
 ### Front-panel lights
 The window shows power, per-drive floppy (green: motor on; blinking yellow: disk DMA running) and hard disk (amber: busy) lights under the picture. `--leds` adds them to headless screenshots.
 
+### Display window starting at line 0
+Aerial Racers, AmiBee and Overdose set DIWSTRT to `$0081`, a vertical start of line 0. Agnus closed the window at line 0 after opening it, so their bitplanes never showed. Real Agnus (except the A1000's) opens the window at once.
+
+Paula also now finishes the current word when a channel's DMA is switched off, then requests an interrupt unless one is pending, as in the HRM state diagram. Sound drivers wait for that interrupt after stopping a channel.
+
 ### Remaining open items
-- **No picture within 90 s:** Concrete, HOG, Lux Aeterna Luceat Eis, Mental, Psylteflesk, Tour de Scene and The Chronicles of Professor Arronax (A4000); Aerial Racers, AmiBee and Overdose (A1200 floppies; Overdose plays music with bitplane DMA off).
+- **No picture within 90 s:** Concrete, HOG, Lux Aeterna Luceat Eis, Mental, Psylteflesk, Tour de Scene and The Chronicles of Professor Arronax (A4000).
 - **Still precalculating at 90 s:** Incision, Lapsuus, Multiverse and The Castle.
 - **Not emulated:** CD32/CDTV, PowerPC boards, and Amiga Forever host-folder drives (A4000 Enhanced, AROS, Walker).
 - **Not Amiga software:** the Videos and Gallery packages (DVD video and host images for Amiga Forever's player). The emulator now refuses them with that explanation.
