@@ -100,6 +100,8 @@ pub struct Gayle {
     pub a4000: bool,
     /// Counts drive commands and sector transfers (for the activity LED).
     pub activity: u64,
+    /// Block of the last read or write command, until the drive sounds collect it.
+    pub pending_seek: Option<u32>,
     pub drives: [Option<AtaDrive>; 2],
     id_pos: u8,
     irq_latch: u8,
@@ -130,6 +132,7 @@ impl Gayle {
         Gayle {
             a4000: false,
             activity: 0,
+            pending_seek: None,
             drives: [None, None],
             id_pos: 0,
             irq_latch: 0,
@@ -405,6 +408,7 @@ impl Gayle {
                 let Some(lba) = self.address() else { return self.abort() };
                 let per_irq = if cmd == 0xc4 { self.drive().unwrap().multiple } else { 1 };
                 self.lba = lba;
+                self.pending_seek = Some(lba);
                 self.xfer = Xfer::Read { count, per_irq };
                 self.load_sectors();
             }
@@ -412,6 +416,7 @@ impl Gayle {
                 let Some(lba) = self.address() else { return self.abort() };
                 let per_irq = if cmd == 0xc5 { self.drive().unwrap().multiple } else { 1 };
                 self.lba = lba;
+                self.pending_seek = Some(lba);
                 self.xfer = Xfer::Write { count, per_irq };
                 self.buf = vec![0; (per_irq.min(count) * 512) as usize];
                 self.pos = 0;

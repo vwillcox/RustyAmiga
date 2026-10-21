@@ -84,6 +84,7 @@ Host keys:
   Home          joystick on cursor keys (Right Ctrl = fire)
   PageDown      next disk in swap list into DF0
   PageUp        hard reset           Insert     Amiga HELP key
+  Pause         drive noises on/off
   Drag an .adf file onto the window to insert it into DF0.
 The strip under the picture shows the power, floppy (green: motor on,
 blinking yellow: reading/writing) and hard disk (amber: busy) lights.";
@@ -279,6 +280,9 @@ impl App {
             }
             if self.speed_floor.is_some() {
                 t.push_str(&format!(" [CPU x{:.0}]", self.amiga.board.cfg.cpu_speed));
+            }
+            if !self.amiga.board.audio.mech.enabled {
+                t.push_str(" [drive noises off]");
             }
             w.set_title(&t);
         }
@@ -498,6 +502,12 @@ impl ApplicationHandler for App {
                         }
                         KeyCode::PageUp => {
                             self.amiga.hard_reset();
+                            return;
+                        }
+                        KeyCode::Pause => {
+                            let m = &mut self.amiga.board.audio.mech;
+                            m.enabled = !m.enabled;
+                            self.update_title();
                             return;
                         }
                         KeyCode::PageDown => {

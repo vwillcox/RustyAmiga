@@ -45,11 +45,13 @@ pub struct HardDisk {
     pub read_only: bool,
     /// Sense key / additional sense code for REQUEST SENSE.
     sense: (u8, u8),
+    /// Block of the last read or write, until the drive sounds collect it.
+    pub pending_seek: Option<u32>,
 }
 
 impl HardDisk {
     pub fn new(name: String, data: Vec<u8>, read_only: bool) -> HardDisk {
-        HardDisk { name, data, read_only, sense: (0, 0) }
+        HardDisk { name, data, read_only, sense: (0, 0), pending_seek: None }
     }
 
     fn blocks(&self) -> u32 {
@@ -138,6 +140,7 @@ impl HardDisk {
             }
             0x08 | 0x28 => {
                 let (lba, n) = if cdb[0] == 0x08 { (lba6(), len6()) } else { (lba10(), len10()) };
+                self.pending_seek = Some(lba);
                 let (a, b) = (lba as usize * 512, (lba + n) as usize * 512);
                 if b > self.data.len() {
                     self.sense = (5, 0x21);
@@ -148,6 +151,7 @@ impl HardDisk {
             }
             0x0a | 0x2a => {
                 let (lba, n) = if cdb[0] == 0x0a { (lba6(), len6()) } else { (lba10(), len10()) };
+                self.pending_seek = Some(lba);
                 let (a, b) = (lba as usize * 512, (lba + n) as usize * 512);
                 if self.read_only {
                     self.sense = (7, 0x27);

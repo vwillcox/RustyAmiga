@@ -603,7 +603,27 @@ impl Board {
         }
         self.scsi_tick();
         self.update_cia_irq();
+        self.update_drive_sounds();
         self.start_line();
+    }
+
+    /// Pass the drives' mechanical state on to the drive sounds.
+    fn update_drive_sounds(&mut self) {
+        for (i, d) in self.drives.iter().enumerate() {
+            self.audio.mech.set_floppy(i, d.present && d.motor, d.disk.is_some());
+        }
+        let mut seeks = [None; 8];
+        if let Some(g) = self.gayle.as_mut() {
+            seeks[0] = g.pending_seek.take();
+        }
+        if let Some(s) = self.scsi.as_mut() {
+            for (slot, d) in seeks[1..].iter_mut().zip(s.disks.iter_mut().flatten()) {
+                *slot = d.pending_seek.take();
+            }
+        }
+        for lba in seeks.into_iter().flatten() {
+            self.audio.mech.hard_disk_access(lba);
+        }
     }
 
     fn start_line(&mut self) {
@@ -848,6 +868,7 @@ impl Board {
         let outward = new & 2 != 0;
         let side = if new & 4 == 0 { 1 } else { 0 };
         let motor = new & 0x80 == 0;
+        let mut stepped = [false; 4];
         for (i, d) in self.drives.iter_mut().enumerate() {
             let bit = 0x08 << i;
             let sel = new & bit == 0;
@@ -864,6 +885,8 @@ impl Board {
             d.selected = sel;
             d.side = side;
             if sel && step && d.present {
+                // The head clacks even when it is already against track 0.
+                stepped[i] = true;
                 if outward {
                     d.cyl = d.cyl.saturating_sub(1);
                 } else if d.cyl < 83 {
@@ -873,6 +896,9 @@ impl Board {
                     d.changed = false;
                 }
             }
+        }
+        for (i, _) in stepped.iter().enumerate().filter(|s| *s.1) {
+            self.audio.mech.floppy_step(i);
         }
     }
 

@@ -7,6 +7,7 @@ pub mod cia;
 pub mod config;
 pub mod cpu;
 pub mod disasm;
+pub mod drivesound;
 pub mod floppy;
 pub mod gayle;
 pub mod dirfs;

@@ -114,6 +114,8 @@ pub struct Audio {
     pub stereo_separation: f32,
     stage: [Stage; 2],
     hp_rate: OnePole,
+    /// Floppy and hard disk noises, mixed in after the analog stage.
+    pub mech: crate::drivesound::DriveSounds,
 }
 
 /// Something that can serve audio DMA fetches.
@@ -143,6 +145,7 @@ impl Audio {
             stereo_separation: 1.0,
             stage: [stage; 2],
             hp_rate: OnePole::lowpass(5.2, 48000.0),
+            mech: crate::drivesound::DriveSounds::new(48000),
         }
     }
 
@@ -150,6 +153,7 @@ impl Audio {
     pub fn set_sample_rate(&mut self, rate: u32) {
         self.sample_rate = rate;
         self.hp_rate = OnePole::lowpass(5.2, rate as f64);
+        self.mech.set_rate(rate);
         for s in self.stage.iter_mut() {
             s.hp = self.hp_rate;
         }
@@ -304,9 +308,10 @@ impl Audio {
             r = self.stage[1].hp.hp(r);
             let sep = self.stereo_separation as f64;
             let (l, r) = (l * (0.5 + sep / 2.0) + r * (0.5 - sep / 2.0), r * (0.5 + sep / 2.0) + l * (0.5 - sep / 2.0));
+            let m = self.mech.sample();
             if self.out.len() < 96000 {
-                self.out.push(l as f32);
-                self.out.push(r as f32);
+                self.out.push(l as f32 + m);
+                self.out.push(r as f32 + m);
             }
         }
         irq

@@ -66,6 +66,9 @@ struct Args {
     /// Stereo separation 0.0 (mono) to 1.0 (hard-panned, like real hardware).
     #[arg(long, default_value_t = 1.0)]
     stereo_separation: f32,
+    /// Do not play the floppy and hard disk mechanism noises (Pause toggles them).
+    #[arg(long)]
+    no_drive_sounds: bool,
     /// Speed up floppy DMA.
     #[arg(long)]
     turbo_floppy: bool,
@@ -477,6 +480,10 @@ fn main() {
         amiga.board.scsi = Some(ctl);
     }
     amiga.board.audio.stereo_separation = args.stereo_separation.clamp(0.0, 1.0);
+    amiga.board.audio.mech.enabled = !args.no_drive_sounds;
+    let has_hd = amiga.board.gayle.as_ref().is_some_and(|g| g.drives.iter().any(|d| d.is_some()))
+        || amiga.board.scsi.as_ref().is_some_and(|s| s.disks.iter().any(|d| d.is_some()));
+    amiga.board.audio.mech.set_hard_disk(has_hd);
     let ext = args.ext_rom.clone().or_else(|| {
         // AROS ships its kernel split across a main and an extension ROM, and
         // the CD32 has an extended ROM with its CD player and boot animation.
