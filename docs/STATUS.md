@@ -46,7 +46,7 @@ The A590/A2091 controller is emulated at the hardware level and driven by Commod
 - A1200: Gayle IDE. A4000: 32-bit address space, motherboard and Zorro III RAM, A4000 IDE, Ramsey.
 - Amiga Forever's bare-partition application HDFs get an RDB synthesized in memory (`src/hdf.rs`).
 - Shared boot media come from the AF DVD: `./hdf/workbench-*.hdf` and `./adf/amiga-os-*-workbench.adf`.
-- The SingleStepTests data lives in `./sst` (gitignored). Run it with `SST_DIR=sst/v1 cargo test --release --test sst -- --nocapture`. STOP fails 1230 cases, which was already the case before this work.
+- The SingleStepTests data lives in `./sst` (gitignored). Run it with `SST_DIR=sst/v1 cargo test --release --test sst -- --nocapture`. The whole suite passes (261894 cases; address-error cases are skipped).
 
 ### Fixed after the first AGA pass
 - **Lisa's DENISEID now reads `$00F8`.** Its upper byte is the revision; with `$FF` there, graphics.library built an ECS-limited display database and 8-plane OS screens failed to open. This fixed about a dozen OS-friendly AGA demos.
@@ -66,15 +66,15 @@ Aerial Racers, AmiBee and Overdose set DIWSTRT to `$0081`, a vertical start of l
 
 Paula also now finishes the current word when a channel's DMA is switched off, then requests an interrupt unless one is pending, as in the HRM state diagram. Sound drivers wait for that interrupt after stopping a channel.
 
-### JIT packages
-59 RP9s ask for UAE's JIT, so the demos expect far more CPU than a real 68030/040. Those packages now get an adaptive CPU speed in the window: every 25 frames the multiplier rises by 25% while emulation uses under 60% of the frame time, and drops by 20% above 85%. It never goes below the model default and is shown in the title bar. Headless runs use a fixed 32x so test results are repeatable. `--cpu-speed` overrides both. This fixed Concrete, Lux Aeterna Luceat Eis, Psylteflesk, Tour de Scene, The Chronicles of Professor Arronax, Multiverse and Lapsuus, which only looked blank because they were still precalculating.
+### JIT and maximum-speed packages
+59 RP9s ask for UAE's JIT and 12 more for `speed="max"` (UAE's "fastest possible" CPU), so the demos expect far more CPU than a real 68030/040. Those packages now get an adaptive CPU speed in the window: every 25 frames the multiplier rises by 25% while emulation uses under 60% of the frame time, and drops by 20% above 85%. It never goes below the model default and is shown in the title bar. Headless runs use a fixed 32x so test results are repeatable. `--cpu-speed` overrides both. This fixed Concrete, Lux Aeterna Luceat Eis, Psylteflesk, Tour de Scene, The Chronicles of Professor Arronax, Multiverse and Lapsuus, which only looked blank because they were still precalculating, and The Castle.
 
 ### DIWHIGH horizontal bits and BSCAN2
 - Denise now takes the horizontal H8 bits from DIWHIGH. A stop position left of the start (Mental's `$00A`) keeps the window open to the end of the line, because the window is a flip-flop.
 - AGA BSCAN2 (FMODE bit 14) scan doubling: every plane adds BPL1MOD and BPL2MOD on alternate lines, with the parity counted from the DIWSTRT line. Mental, Goa, Lapsuus, Ocean Machine, Burning Chrome, Under Pressure and Sumea use it and showed vertical streaks or garbage. Fatman's title picture is no longer cut off.
 
 ### Remaining open items
-- **Still precalculating at 90 s:** Incision (JIT), and The Castle (speed="max" without JIT, so 8x).
+- **Incision still precalculates at 90 s.** It renders its soundtrack first; at 64x this finishes around frame 7500.
 - **Not emulated:** CD32/CDTV, PowerPC boards, and Amiga Forever host-folder drives (A4000 Enhanced, AROS, Walker).
 - **Not Amiga software:** the Videos and Gallery packages (DVD video and host images for Amiga Forever's player). The emulator now refuses them with that explanation.
 
@@ -85,14 +85,14 @@ Paula also now finishes the current word when a channel's DMA is switched off, t
 - **Tie Break works but is slow.** Its trackloader takes about 100 s at authentic disk speed, so the 90 s automated test marked it blank. Use warp (End).
 - **Rink-a-Dink works.** It waits for a left mouse click after the intro, so the automated test showed black.
 - **AROS:** the extension ROM is mapped, but the screen stays dark. Not yet diagnosed.
-- **Logica DiagROM:** shows a garbage display. Not yet diagnosed.
+- **Logica Dialoga 2.0 (diagnostic ROM) works.** Its colour-bar test pattern is followed by the title screen. It continues on a mouse button or fire button; the keyboard is only enabled after its keyboard test.
 - **RP9 host folders** (`<harddrive root="shared"/>`) are skipped. They need a host filesystem handler.
 - **Not implemented:**
   - BPLCON2 undocumented priority codes 5-7.
   - The exact BLTBDAT hold semantics.
   - Cycle-exact blitter and CPU timing. Blits are immediate, with timed completion.
   - Bus and address error exceptions.
-  - 68020/030/040, FPU and the AGA chipset (A1200/A3000/A4000/CD32 Kickstarts and 20 titles).
+  - 68030/68040 MMU address translation, and the 68060.
 
 ## Next milestones
 

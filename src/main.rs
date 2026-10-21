@@ -45,8 +45,8 @@ struct Args {
     /// Fast RAM in KB: Zorro II (autoconfig), or motherboard RAM on the A3000/A4000.
     #[arg(long)]
     fast: Option<u32>,
-    /// CPU speed as a multiple of a 7 MHz 68000 (default: per model; 8 for
-    /// RP9 packages that ask for maximum speed).
+    /// CPU speed as a multiple of a 7 MHz 68000 (default: per model; RP9 packages
+    /// that ask for a JIT or maximum speed adapt to the host, or 32 headless).
     #[arg(long)]
     cpu_speed: Option<f32>,
     /// CPU: 68000, 68020, 68030 or 68040 (default: per model).
@@ -325,13 +325,11 @@ fn main() {
     if let Some(z) = args.z3 {
         cfg.z3_kb = z;
     }
-    if rp9.as_ref().is_some_and(|r| r.cpu_max) {
-        cfg.cpu_speed = cfg.cpu_speed.max(8.0);
-    }
-    if rp9.as_ref().is_some_and(|r| r.jit) {
-        // Demos written for a JIT expect far more CPU than a real 68030/040. The
-        // window adapts the speed to the host; headless runs use a fixed value
-        // so that results are repeatable.
+    if rp9.as_ref().is_some_and(|r| r.jit || r.cpu_max) {
+        // Packages asking for a JIT or the fastest CPU (speed="max") expect far
+        // more CPU than a real 68020-68040: UAE runs them as fast as the host
+        // allows. The window adapts the speed to the host; headless runs use a
+        // fixed value so that results are repeatable.
         if args.headless {
             cfg.cpu_speed = cfg.cpu_speed.max(32.0);
         } else {
