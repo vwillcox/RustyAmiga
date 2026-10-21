@@ -109,11 +109,24 @@ fn run_file(path: &std::path::Path, verbose: usize) -> (usize, usize, usize) {
                 addr_err = true;
             }
         }
-        if addr_err {
+        if addr_err && std::env::var_os("SST_ADDR_ERR").is_none() {
             skip += 1;
             continue;
         }
+        if !addr_err && std::env::var_os("SST_ADDR_ERR").is_some_and(|v| v == "only") {
+            continue;
+        }
 
+        if addr_err && std::env::var_os("SST_AE_DUMP").is_some() {
+            // Expected group 0 frame: PC at SSP+10, status at SSP.
+            let ssp = fin.regs[16];
+            let m: HashMap<u32, u8> = fin.ram.iter().copied().collect();
+            let rd = |a: u32| m.get(&(a & 0xff_ffff)).copied().unwrap_or(0) as u32;
+            let pc = rd(ssp + 10) << 24 | rd(ssp + 11) << 16 | rd(ssp + 12) << 8 | rd(ssp + 13);
+            let st = rd(ssp) << 8 | rd(ssp + 1);
+            let ipc = init.regs[18].wrapping_sub(4);
+            println!("AE {}|{:+}|{:04x}", name, pc.wrapping_sub(ipc) as i32, st);
+        }
         let mut bus = TestBus { mem: HashMap::new() };
         let pc = init.regs[18];
         bus.write16(pc.wrapping_sub(4), init.prefetch[0] as u16);

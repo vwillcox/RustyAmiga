@@ -445,9 +445,9 @@ impl Cpu {
         if !unpack {
             let src = if mem {
                 self.a[rx] = self.a[rx].wrapping_sub(dec(rx));
-                let lo = bus.read8(self.a[rx]) as u16;
+                let lo = self.bus_read8(bus, self.a[rx]) as u16;
                 self.a[rx] = self.a[rx].wrapping_sub(dec(rx));
-                let hi = bus.read8(self.a[rx]) as u16;
+                let hi = self.bus_read8(bus, self.a[rx]) as u16;
                 hi << 8 | lo
             } else {
                 self.d[rx] as u16
@@ -456,23 +456,23 @@ impl Cpu {
             let b = ((v >> 4) & 0xf0 | v & 0x0f) as u8;
             if mem {
                 self.a[ry] = self.a[ry].wrapping_sub(dec(ry));
-                bus.write8(self.a[ry], b);
+                self.bus_write8(bus, self.a[ry], b);
             } else {
                 self.d[ry] = (self.d[ry] & !0xff) | b as u32;
             }
         } else {
             let src = if mem {
                 self.a[rx] = self.a[rx].wrapping_sub(dec(rx));
-                bus.read8(self.a[rx]) as u16
+                self.bus_read8(bus, self.a[rx]) as u16
             } else {
                 self.d[rx] as u16 & 0xff
             };
             let v = ((src & 0xf0) << 4 | src & 0x0f).wrapping_add(adj);
             if mem {
                 self.a[ry] = self.a[ry].wrapping_sub(dec(ry));
-                bus.write8(self.a[ry], v as u8);
+                self.bus_write8(bus, self.a[ry], v as u8);
                 self.a[ry] = self.a[ry].wrapping_sub(dec(ry));
-                bus.write8(self.a[ry], (v >> 8) as u8);
+                self.bus_write8(bus, self.a[ry], (v >> 8) as u8);
             } else {
                 self.d[ry] = (self.d[ry] & !0xffff) | v as u32;
             }
@@ -513,7 +513,7 @@ impl Cpu {
                 let nbytes = (bitoff + width).div_ceil(8);
                 let mut raw: u64 = 0;
                 for i in 0..nbytes {
-                    raw = raw << 8 | bus.read8(addr.wrapping_add(i)) as u64;
+                    raw = raw << 8 | self.bus_read8(bus, addr.wrapping_add(i)) as u64;
                 }
                 let shift = nbytes * 8 - bitoff - width;
                 field = (raw >> shift) as u32 & fmask;
@@ -566,12 +566,12 @@ impl Cpu {
             Loc::Mem(addr, nbytes, shift) => {
                 let mut raw: u64 = 0;
                 for i in 0..nbytes {
-                    raw = raw << 8 | bus.read8(addr.wrapping_add(i)) as u64;
+                    raw = raw << 8 | self.bus_read8(bus, addr.wrapping_add(i)) as u64;
                 }
                 let m = (fmask as u64) << shift;
                 raw = (raw & !m) | ((new as u64) << shift & m);
                 for i in 0..nbytes {
-                    bus.write8(addr.wrapping_add(i), (raw >> ((nbytes - 1 - i) * 8)) as u8);
+                    self.bus_write8(bus, addr.wrapping_add(i), (raw >> ((nbytes - 1 - i) * 8)) as u8);
                 }
             }
         }

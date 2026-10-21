@@ -47,7 +47,7 @@ The A590/A2091 controller is emulated at the hardware level and driven by Commod
 - A1200: Gayle IDE. A4000: 32-bit address space, motherboard and Zorro III RAM, A4000 IDE, Ramsey.
 - Amiga Forever's bare-partition application HDFs get an RDB synthesized in memory (`src/hdf.rs`).
 - Shared boot media come from the AF DVD: `./hdf/workbench-*.hdf` and `./adf/amiga-os-*-workbench.adf`.
-- The SingleStepTests data lives in `./sst` (gitignored). Run it with `SST_DIR=sst/v1 cargo test --release --test sst -- --nocapture`. The whole suite passes (261894 cases; address-error cases are skipped).
+- The SingleStepTests data lives in `./sst` (gitignored). Run it with `SST_DIR=sst/v1 cargo test --release --test sst -- --nocapture`. The whole suite passes (261894 cases). Address-error cases are skipped by default; `SST_ADDR_ERR=1` includes them and `SST_ADDR_ERR=only` runs just those (54773 of 55606 pass).
 
 ### Fixed after the first AGA pass
 - **Lisa's DENISEID now reads `$00F8`.** Its upper byte is the revision; with `$FF` there, graphics.library built an ECS-limited display database and 8-plane OS screens failed to open. This fixed about a dozen OS-friendly AGA demos.
@@ -89,6 +89,9 @@ Voyage (Razor 1911) now runs. Its protection needed three timing details:
 - **Chip bus.** CPU accesses start on any colour clock, not only even ones. The protection builds its decryption key from where two CIA timer interrupts fall in a copy loop, and only the 58-cycle loop that this gives decrypts. The key was found by modelling the key derivation and testing candidate keys.
 - **Interrupt latency.** A newly raised interrupt level reaches the CPU 3 colour clocks after Paula raises it. F1 GP Circuits polls VPOSR for line 0, where the vertical blank interrupt is raised, and hung without the delay. Voyage also needs 3 or 4.
 
+### 68000 address errors
+A word or long access at an odd address, or a jump to one, raises a group 0 exception with the 14-byte frame (status word, access address, IR, SR, PC). The instruction stops at the faulting access. Where its address registers, flags and stacked PC end up follows the SingleStepTests data. The misses (1.5%) are in MOVE's partial flag updates and a few stacked PCs. The emulator used to carry on silently, so crashing programs now Guru with 80000003 as on real hardware. The RP9 batch is unchanged.
+
 ### Remaining open items
 - **Incision works but precalculates for a long time.** It renders its soundtrack first; at 64x the intro starts by frame 9000.
 - **Not emulated:** the CD32's CD-ROM drive, the CDTV, PowerPC boards, UAE's RTG card (uaegfx), and the user's own shared folder (`<harddrive root="shared"/>`, which is skipped). The Walker prototype's folders are not on the AF 11 DVD.
@@ -104,7 +107,7 @@ Voyage (Razor 1911) now runs. Its protection needed three timing details:
   - BPLCON2 undocumented priority codes 5-7.
   - The exact BLTBDAT hold semantics.
   - Cycle-exact blitter and CPU timing. Blits are immediate, with timed completion.
-  - Bus and address error exceptions.
+  - Bus error exceptions (address errors are emulated).
   - 68030/68040 MMU address translation, and the 68060.
 
 ## Next milestones

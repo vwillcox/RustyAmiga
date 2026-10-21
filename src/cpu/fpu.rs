@@ -256,7 +256,7 @@ impl Cpu {
             FEa::Imm(v) => b = *v,
             FEa::M(a) => {
                 for i in 0..bytes {
-                    b[i as usize] = bus.read8(a.wrapping_add(i));
+                    b[i as usize] = self.bus_read8(bus, a.wrapping_add(i));
                 }
                 return b;
             }
@@ -288,7 +288,7 @@ impl Cpu {
             FEa::A(r) => self.a[*r] = u32::from_be_bytes(b[..4].try_into().unwrap()),
             FEa::M(a) => {
                 for i in 0..bytes {
-                    bus.write8(a.wrapping_add(i), b[i as usize]);
+                    self.bus_write8(bus, a.wrapping_add(i), b[i as usize]);
                 }
             }
             FEa::Imm(_) => {}
@@ -787,7 +787,7 @@ impl Cpu {
                     addr = addr.wrapping_sub(12);
                     let b = f64_to_ext(self.fp[i]);
                     for (k, byte) in b.iter().enumerate() {
-                        bus.write8(addr.wrapping_add(k as u32), *byte);
+                        self.bus_write8(bus, addr.wrapping_add(k as u32), *byte);
                     }
                 }
             }
@@ -809,12 +809,12 @@ impl Cpu {
             if to_mem {
                 let b = f64_to_ext(self.fp[i]);
                 for (k, byte) in b.iter().enumerate() {
-                    bus.write8(addr.wrapping_add(k as u32), *byte);
+                    self.bus_write8(bus, addr.wrapping_add(k as u32), *byte);
                 }
             } else {
                 let mut b = [0u8; 12];
                 for (k, byte) in b.iter_mut().enumerate() {
-                    *byte = bus.read8(addr.wrapping_add(k as u32));
+                    *byte = self.bus_read8(bus, addr.wrapping_add(k as u32));
                 }
                 self.fp[i] = ext_to_f64(&b);
             }

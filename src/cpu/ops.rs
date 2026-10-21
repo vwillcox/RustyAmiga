@@ -200,13 +200,13 @@ impl Cpu {
         if to_mem {
             let v = self.d[dr];
             for i in (0..n).rev() {
-                bus.write8(addr, (v >> (i * 8)) as u8);
+                self.bus_write8(bus, addr, (v >> (i * 8)) as u8);
                 addr = addr.wrapping_add(2);
             }
         } else {
             let mut v = 0u32;
             for _ in 0..n {
-                v = v << 8 | bus.read8(addr) as u32;
+                v = v << 8 | self.bus_read8(bus, addr) as u32;
                 addr = addr.wrapping_add(2);
             }
             if long {
@@ -236,12 +236,22 @@ impl Cpu {
             let r = dreg as usize;
             let dec = if r == 7 && sz == Size::B { 2 } else { sz.bytes() };
             self.a[r] = self.a[r].wrapping_sub(dec);
+            self.last_ea = Some((4, r, sz, self.a[r]));
             Ea::M(self.a[r])
         } else {
             self.ea(bus, dmode, dreg, sz)
         };
-        self.logic_flags(v, sz);
-        self.write_ea(bus, dst_ea, sz, v);
+        if sz == Size::L && matches!(dst_ea, Ea::M(_)) {
+            // A long MOVE to memory sets the flags in two steps: an address
+            // error on the write leaves N from the high word and Z from the low.
+            self.logic_flags(v, sz);
+            self.z = v & 0xffff == 0;
+            self.write_ea(bus, dst_ea, sz, v);
+            self.logic_flags(v, sz);
+        } else {
+            self.logic_flags(v, sz);
+            self.write_ea(bus, dst_ea, sz, v);
+        }
     }
 
     // ---- line 4: miscellaneous ---------------------------------------------
@@ -513,9 +523,12 @@ impl Cpu {
             }
             0x4e58..=0x4e5f => {
                 // UNLK
+                // The frame pointer is read before it becomes the stack
+                // pointer, so an odd one faults with A7 unchanged.
                 let r = (op & 7) as usize;
-                self.a[7] = self.a[r];
-                let v = self.pop32(bus);
+                let fp = self.a[r];
+                let v = self.read32(bus, fp);
+                self.a[7] = fp.wrapping_add(4);
                 self.a[r] = v;
             }
             0x4e60..=0x4e67 => {
@@ -607,10 +620,10 @@ impl Cpu {
                     };
                     addr = addr.wrapping_sub(sz.bytes());
                     if sz == Size::L {
-                        bus.write16(addr.wrapping_add(2), v as u16);
-                        bus.write16(addr, (v >> 16) as u16);
+                        self.bus_write16(bus, addr.wrapping_add(2), v as u16);
+                        self.bus_write16(bus, addr, (v >> 16) as u16);
                     } else {
-                        bus.write16(addr, v as u16);
+                        self.bus_write16(bus, addr, v as u16);
                     }
                 }
             }
@@ -657,7 +670,7 @@ impl Cpu {
         }
         // The 68000 performs one extra word read past the end of the list.
         if !self.is_020() {
-            let _ = bus.read16(addr);
+            let _ = self.bus_read16(bus, addr);
         }
         if mode == 3 {
             self.a[reg] = addr;
@@ -774,7 +787,7 @@ impl Cpu {
                 } else {
                     let (src, dst, addr) = self.predec_pair(bus, reg as usize, dn, Size::B);
                     let r = self.bcd_sub(dst, src);
-                    bus.write8(addr, r as u8);
+                    self.bus_write8(bus, addr, r as u8);
                 }
                 return;
             }
@@ -801,8 +814,10 @@ impl Cpu {
         let dec = |r: usize| if r == 7 && sz == Size::B { 2 } else { sz.bytes() };
         bus.idle(2);
         self.a[ry] = self.a[ry].wrapping_sub(dec(ry));
+        self.last_ea = Some((EA_PREDEC_PAIR, ry, sz, self.a[ry]));
         let src = self.read(bus, self.a[ry], sz);
         self.a[rx] = self.a[rx].wrapping_sub(dec(rx));
+        self.last_ea = Some((EA_PREDEC_PAIR, rx, sz, self.a[rx]));
         let dst = self.read(bus, self.a[rx], sz);
         (src, dst, self.a[rx])
     }
@@ -908,8 +923,8 @@ impl Cpu {
                 let (src, dst, addr) = self.predec_pair(bus, reg as usize, dn, sz);
                 let r = if add { self.add(src, dst, sz, true) } else { self.sub(src, dst, sz, true, false) };
                 if sz == Size::L {
-                    bus.write16(addr.wrapping_add(2), r as u16);
-                    bus.write16(addr, (r >> 16) as u16);
+                    self.bus_write16(bus, addr.wrapping_add(2), r as u16);
+                    self.bus_write16(bus, addr, (r >> 16) as u16);
                 } else {
                     self.write(bus, addr, sz, r);
                 }
@@ -963,10 +978,16 @@ impl Cpu {
             // CMPM (Ay)+,(Ax)+
             let ry = reg as usize;
             let inc = |r: usize| if r == 7 && sz == Size::B { 2 } else { sz.bytes() };
-            let src = self.read(bus, self.a[ry], sz);
-            self.a[ry] = self.a[ry].wrapping_add(inc(ry));
-            let dst = self.read(bus, self.a[dn], sz);
-            self.a[dn] = self.a[dn].wrapping_add(inc(dn));
+            // Each address register steps on before its read (so an address
+            // error leaves it incremented).
+            let ay = self.a[ry];
+            self.a[ry] = ay.wrapping_add(inc(ry));
+            self.last_ea = Some((EA_CMPM, ry, sz, ay));
+            let src = self.read(bus, ay, sz);
+            let ax = self.a[dn];
+            self.a[dn] = ax.wrapping_add(inc(dn));
+            self.last_ea = Some((EA_CMPM, dn, sz, ax));
+            let dst = self.read(bus, ax, sz);
             self.sub(src, dst, sz, false, true);
             return;
         }
@@ -1038,7 +1059,7 @@ impl Cpu {
                 } else {
                     let (src, dst, addr) = self.predec_pair(bus, reg as usize, dn, Size::B);
                     let r = self.bcd_add(dst, src);
-                    bus.write8(addr, r as u8);
+                    self.bus_write8(bus, addr, r as u8);
                 }
                 return;
             }

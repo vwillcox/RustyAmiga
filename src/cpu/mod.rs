@@ -66,6 +66,11 @@ pub enum Ea {
     Imm(u32),
 }
 
+/// `last_ea` modes beyond the 68000's own: the operand pairs of ADDX/SUBX-style
+/// -(Ay),-(Ax) instructions and of CMPM (Ay)+,(Ax)+.
+const EA_PREDEC_PAIR: u16 = 8;
+const EA_CMPM: u16 = 9;
+
 pub const VEC_BUS_ERROR: u32 = 2;
 pub const VEC_ADDRESS_ERROR: u32 = 3;
 pub const VEC_ILLEGAL: u32 = 4;
@@ -92,6 +97,26 @@ pub enum CpuModel {
     M68040,
 }
 
+/// An address error: the faulting access.
+#[derive(Clone, Copy, Debug)]
+struct Fault {
+    addr: u32,
+    write: bool,
+    /// Instruction (program space) access rather than data.
+    fetch: bool,
+    /// Registers when the fault happened: the instruction stops there, so
+    /// anything it would have done afterwards is undone.
+    d: [u32; 8],
+    a: [u32; 8],
+    sr: u16,
+    pc: u32,
+    /// Displacement/index words fetched before the fault (not counted in the
+    /// stacked PC by most instructions).
+    disp: u32,
+    /// The effective address being accessed (see `last_ea`).
+    ea: Option<(u16, usize, Size, u32)>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Cpu {
     pub d: [u32; 8],
@@ -111,6 +136,16 @@ pub struct Cpu {
     pub c: bool,
     pub stopped: bool,
     pub halted: bool,
+    /// A 68000 address error raised by the current instruction.
+    fault: Option<Fault>,
+    /// Displacement and index words the current instruction has fetched; the
+    /// PC stacked for an address error does not count them.
+    disp_words: u32,
+    /// The last memory effective address computed: (mode, register, size, address).
+    last_ea: Option<(u16, usize, Size, u32)>,
+    /// Start of the previous instruction (a jump to an odd address faults on
+    /// the following fetch, but the 68000 reports the jump).
+    prev_instr_pc: u32,
     /// Address of the instruction currently executing.
     pub instr_pc: u32,
     /// Set by an instruction that raised an exception, so trace is suppressed.
@@ -267,10 +302,87 @@ impl Cpu {
 
     // ---- bus helpers -------------------------------------------------------
 
+    // Every CPU bus access goes through these. On the 68000 a word or long
+    // access at an odd address is an address error: the access does not
+    // happen, nor does anything after it in the instruction.
+
+    #[inline]
+    fn bus_read8<B: Bus>(&mut self, bus: &mut B, addr: u32) -> u8 {
+        if self.fault.is_some() {
+            return 0;
+        }
+        bus.read8(addr)
+    }
+
+    #[inline]
+    fn bus_write8<B: Bus>(&mut self, bus: &mut B, addr: u32, v: u8) {
+        if self.fault.is_none() {
+            bus.write8(addr, v);
+        }
+    }
+
+    /// An instruction fetch from an odd address.
+    #[cold]
+    #[inline(never)]
+    fn fetch_fault(&mut self) {
+        if self.fault.is_none() {
+            let pc = self.prev_instr_pc.wrapping_add(2);
+            self.fault = Some(Fault { addr: self.pc, write: false, fetch: true, d: self.d, a: self.a, sr: self.sr(), pc, disp: 0, ea: None });
+        }
+    }
+
+    /// Record an address error at `addr`, with the registers as they are now.
+    #[cold]
+    #[inline(never)]
+    fn capture_fault(&mut self, addr: u32, write: bool) {
+        let mut a = self.a;
+        let mut addr = addr;
+        let ea = self.last_ea.filter(|e| e.3 == addr);
+        match ea {
+            // A long (An)+ access faults on its first word, before An moves on.
+            Some((3, r, Size::L, _)) => a[r] = a[r].wrapping_sub(4),
+            // ADDX/SUBX -(An) longs step back one word and fault reading the
+            // low word, before An is updated.
+            Some((EA_PREDEC_PAIR, r, Size::L, _)) => {
+                a[r] = a[r].wrapping_add(4);
+                addr = addr.wrapping_add(2);
+            }
+            // CMPM longs have stepped An on by one word.
+            Some((EA_CMPM, r, Size::L, _)) => a[r] = a[r].wrapping_sub(2),
+            _ => {}
+        }
+        let f = Fault { addr, write, fetch: false, d: self.d, a, sr: self.sr(), pc: self.pc, disp: self.disp_words, ea };
+        self.fault = Some(f);
+    }
+
+    #[inline]
+    fn bus_read16<B: Bus>(&mut self, bus: &mut B, addr: u32) -> u16 {
+        if self.fault.is_some() {
+            return 0;
+        }
+        if addr & 1 != 0 && !self.is_020() {
+            self.capture_fault(addr, false);
+            return 0;
+        }
+        bus.read16(addr)
+    }
+
+    #[inline]
+    fn bus_write16<B: Bus>(&mut self, bus: &mut B, addr: u32, v: u16) {
+        if self.fault.is_some() {
+            return;
+        }
+        if addr & 1 != 0 && !self.is_020() {
+            self.capture_fault(addr, true);
+            return;
+        }
+        bus.write16(addr, v);
+    }
+
     #[inline]
     fn read<B: Bus>(&mut self, bus: &mut B, addr: u32, sz: Size) -> u32 {
         match sz {
-            Size::B => bus.read8(addr) as u32,
+            Size::B => self.bus_read8(bus, addr) as u32,
             Size::W => self.read16(bus, addr) as u32,
             Size::L => self.read32(bus, addr),
         }
@@ -280,9 +392,9 @@ impl Cpu {
     #[inline]
     fn read16<B: Bus>(&mut self, bus: &mut B, addr: u32) -> u16 {
         if addr & 1 != 0 && self.is_020() {
-            return (bus.read8(addr) as u16) << 8 | bus.read8(addr.wrapping_add(1)) as u16;
+            return (self.bus_read8(bus, addr) as u16) << 8 | self.bus_read8(bus, addr.wrapping_add(1)) as u16;
         }
-        bus.read16(addr)
+        self.bus_read16(bus, addr)
     }
 
     #[inline]
@@ -295,17 +407,17 @@ impl Cpu {
     #[inline]
     fn write16<B: Bus>(&mut self, bus: &mut B, addr: u32, v: u16) {
         if addr & 1 != 0 && self.is_020() {
-            bus.write8(addr, (v >> 8) as u8);
-            bus.write8(addr.wrapping_add(1), v as u8);
+            self.bus_write8(bus, addr, (v >> 8) as u8);
+            self.bus_write8(bus, addr.wrapping_add(1), v as u8);
             return;
         }
-        bus.write16(addr, v);
+        self.bus_write16(bus, addr, v);
     }
 
     #[inline]
     fn write<B: Bus>(&mut self, bus: &mut B, addr: u32, sz: Size, v: u32) {
         match sz {
-            Size::B => bus.write8(addr, v as u8),
+            Size::B => self.bus_write8(bus, addr, v as u8),
             Size::W => self.write16(bus, addr, v as u16),
             Size::L => {
                 self.write16(bus, addr, (v >> 16) as u16);
@@ -317,24 +429,28 @@ impl Cpu {
     #[inline]
     fn fetch16<B: Bus>(&mut self, bus: &mut B) -> u16 {
         if self.is_020() {
-            let v = bus.read16(self.pc);
+            let v = self.bus_read16(bus, self.pc);
             self.pc = self.pc.wrapping_add(2);
             return v;
+        }
+        if self.pc & 1 != 0 {
+            self.fetch_fault();
+            return 0;
         }
         if !self.pq_valid || self.pq_addr != self.pc {
             // Control flow changed: refill the queue (two bus reads).
             self.pq_addr = self.pc;
-            self.pq[0] = bus.read16(self.pc);
-            self.pq[1] = bus.read16(self.pc.wrapping_add(2));
+            self.pq[0] = self.bus_read16(bus, self.pc);
+            self.pq[1] = self.bus_read16(bus, self.pc.wrapping_add(2));
             self.pq_valid = true;
             self.pq1_valid = true;
             self.pq0_pending = false;
         } else if self.pq0_pending {
-            self.pq[0] = bus.read16(self.pq_addr);
+            self.pq[0] = self.bus_read16(bus, self.pq_addr);
             self.pq0_pending = false;
         }
         let v = self.pq[0];
-        self.pq[0] = if self.pq1_valid { self.pq[1] } else { bus.read16(self.pq_addr.wrapping_add(2)) };
+        self.pq[0] = if self.pq1_valid { self.pq[1] } else { self.bus_read16(bus, self.pq_addr.wrapping_add(2)) };
         self.pq1_valid = false;
         self.pq_addr = self.pq_addr.wrapping_add(2);
         self.pc = self.pc.wrapping_add(2);
@@ -369,18 +485,18 @@ impl Cpu {
 
     fn push16<B: Bus>(&mut self, bus: &mut B, v: u16) {
         self.a[7] = self.a[7].wrapping_sub(2);
-        bus.write16(self.a[7], v);
+        self.bus_write16(bus, self.a[7], v);
     }
 
     fn push32<B: Bus>(&mut self, bus: &mut B, v: u32) {
         // The 68000 writes the low word first when pushing a long.
         self.a[7] = self.a[7].wrapping_sub(4);
-        bus.write16(self.a[7].wrapping_add(2), v as u16);
-        bus.write16(self.a[7], (v >> 16) as u16);
+        self.bus_write16(bus, self.a[7].wrapping_add(2), v as u16);
+        self.bus_write16(bus, self.a[7], (v >> 16) as u16);
     }
 
     fn pop16<B: Bus>(&mut self, bus: &mut B) -> u16 {
-        let v = bus.read16(self.a[7]);
+        let v = self.bus_read16(bus, self.a[7]);
         self.a[7] = self.a[7].wrapping_add(2);
         v
     }
@@ -439,6 +555,15 @@ impl Cpu {
 
     /// Decode an effective address. `mode`/`reg` are the 3-bit fields.
     fn ea<B: Bus>(&mut self, bus: &mut B, mode: u16, reg: u16, sz: Size) -> Ea {
+        let e = self.ea_calc(bus, mode, reg, sz);
+        if let Ea::M(addr) = e {
+            self.last_ea = Some((mode, reg as usize, sz, addr));
+        }
+        e
+    }
+
+    #[inline(always)]
+    fn ea_calc<B: Bus>(&mut self, bus: &mut B, mode: u16, reg: u16, sz: Size) -> Ea {
         let r = reg as usize;
         match mode {
             0 => Ea::D(r),
@@ -458,10 +583,12 @@ impl Cpu {
             }
             5 => {
                 let d = self.fetch16(bus) as i16 as i32 as u32;
+                self.disp_words += 1;
                 Ea::M(self.a[r].wrapping_add(d))
             }
             6 => {
                 let base = self.a[r];
+                self.disp_words += 1;
                 Ea::M(self.index(bus, base))
             }
             _ => match reg {
@@ -470,10 +597,12 @@ impl Cpu {
                 2 => {
                     let base = self.pc;
                     let d = self.fetch16(bus) as i16 as i32 as u32;
+                    self.disp_words += 1;
                     Ea::M(base.wrapping_add(d))
                 }
                 3 => {
                     let base = self.pc;
+                    self.disp_words += 1;
                     Ea::M(self.index(bus, base))
                 }
                 _ => Ea::Imm(match sz {
@@ -510,6 +639,10 @@ impl Cpu {
 
     /// Group 1/2 exception: push PC and SR, jump through `vector`.
     pub fn exception<B: Bus>(&mut self, bus: &mut B, vector: u32, stacked_pc: u32) {
+        if self.fault.is_some() {
+            // The instruction already took an address error.
+            return;
+        }
         static LOG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         if *LOG.get_or_init(|| std::env::var_os("AMIGA_LOG_EXCEPTIONS").is_some()) && vector < 32 {
             eprintln!("exception vector {vector} at pc {:06x} (instr {:06x})", stacked_pc, self.instr_pc);
@@ -646,11 +779,14 @@ impl Cpu {
             self.trace_pending = false;
             let pc = self.pc;
             self.exception(bus, VEC_TRACE, pc);
+            // An odd supervisor stack faults again while stacking: halt.
+            self.halted |= self.fault.take().is_some();
             return;
         }
         let ipl = bus.ipl();
         if ipl > self.imask {
             self.interrupt(bus, ipl);
+            self.halted |= self.fault.take().is_some();
             return;
         }
         if self.stopped {
@@ -659,12 +795,128 @@ impl Cpu {
         }
         let trace = self.t;
         self.exception_taken = false;
+        self.prev_instr_pc = self.instr_pc;
         self.instr_pc = self.pc;
+        self.disp_words = 0;
+        self.last_ea = None;
         let op = self.fetch16(bus);
         self.execute(bus, op);
+        if self.pc & 1 != 0 && self.fault.is_none() && !self.is_020() && !self.exception_taken {
+            // A jump to an odd address faults on the prefetch at its target,
+            // before the jump has pushed or popped anything.
+            self.fault = Some(self.jump_fault(op));
+        }
+        if self.fault.is_some() {
+            let f = self.fault.take().unwrap();
+            self.address_error(bus, f, op);
+            return;
+        }
         if trace && !self.exception_taken {
             self.trace_pending = true;
         }
+    }
+
+    /// The address error for a jump (JMP, JSR, BSR, Bcc, DBcc, RTS, ...) to the
+    /// odd address now in PC. None of these jumps changes SR before faulting.
+    #[cold]
+    #[inline(never)]
+    fn jump_fault(&self, op: u16) -> Fault {
+        let sr = self.sr();
+        let (d, mut a) = (self.d, self.a);
+        let fault = |d, a, sr, pc| Fault { addr: self.pc, write: false, fetch: true, d, a, sr, pc, disp: 0, ea: None };
+        if op & 0xff00 == 0x6100 {
+            // BSR: the target itself, after the return address was pushed.
+            return fault(d, a, sr, self.pc);
+        }
+        if matches!(op, 0x4e73 | 0x4e75 | 0x4e77) {
+            // RTE/RTS/RTR: after the pops (and the SR or CCR they restore).
+            return fault(d, a, sr, self.instr_pc.wrapping_add(2));
+        }
+        let len = if op & 0xffc0 == 0x4e80 {
+            // JSR faults before its push, and stacks its full length.
+            a[7] = a[7].wrapping_add(4);
+            2 + match ((op >> 3) & 7, op & 7) {
+                (2, _) => 0,
+                (7, 1) => 4,
+                _ => 2,
+            }
+        } else if op & 0xf0f8 == 0x50c8 {
+            // DBcc faults before its counter changes.
+            let mut d = d;
+            let r = (op & 7) as usize;
+            d[r] = (d[r] & 0xffff_0000) | (d[r] as u16).wrapping_add(1) as u32;
+            return fault(d, a, sr, self.instr_pc.wrapping_add(4));
+        } else {
+            2
+        };
+        fault(d, a, sr, self.instr_pc.wrapping_add(len))
+    }
+
+    /// Group 0 exception for a 68000 address error. The instruction stops at
+    /// the faulting access (registers and SR as they were then) and a 14-byte
+    /// frame records it: status word, address, instruction register, SR and PC.
+    /// The SingleStepTests address error cases pass 98.5%; the misses are in
+    /// MOVE's partial flag updates and a few stacked PCs.
+    #[cold]
+    #[inline(never)]
+    fn address_error<B: Bus>(&mut self, bus: &mut B, f: Fault, ir: u16) {
+        // The PC the 68000 stacks reflects how far its prefetch had got.
+        let stacked_pc = if f.fetch {
+            f.pc
+        } else if ir & 0xfb80 == 0x4880 {
+            // MOVEM has fetched its register mask and displacement words.
+            f.pc.wrapping_add(2)
+        } else {
+            let mut pc = f.pc.wrapping_sub(2 * f.disp);
+            let predec_word = matches!(f.ea, Some((4, _, Size::W, _)));
+            let pair = matches!(f.ea, Some((EA_PREDEC_PAIR | EA_CMPM, _, _, _)));
+            let move_dest = matches!(ir >> 12, 1..=3) && f.write;
+            let unlk = ir & 0xfff8 == 0x4e58;
+            if predec_word || move_dest || pair || unlk {
+                pc = pc.wrapping_add(2);
+            }
+            pc
+        };
+        let sr = f.sr;
+        self.set_sr(sr);
+        self.d = f.d;
+        self.a = f.a;
+        if std::env::var_os("AMIGA_LOG_EXCEPTIONS").is_some() {
+            eprintln!("address error at {:06x} accessing {:06x}", self.instr_pc, f.addr);
+        }
+        let supervisor = sr & 0x2000 != 0;
+        // PC-relative operands are read from program space.
+        let program = f.fetch || matches!(f.ea, Some((7, 2 | 3, _, _)));
+        let fc = match (supervisor, program) {
+            (false, false) => 1,
+            (false, true) => 2,
+            (true, false) => 5,
+            (true, true) => 6,
+        };
+        // A MOVE to -(An) faults after prefetching the next opcode into IR.
+        let ir = if matches!(ir >> 12, 1..=3) && f.write && matches!(f.ea, Some((4, _, _, _))) {
+            self.bus_read16(bus, f.pc)
+        } else {
+            ir
+        };
+        // I/N (bit 3) is clear: the fault happened while executing an instruction.
+        let status = (ir & !0x1f) | (!f.write as u16) << 4 | fc;
+        self.set_supervisor(true);
+        self.t = false;
+        bus.idle(8);
+        self.push32(bus, stacked_pc);
+        self.push16(bus, sr);
+        self.push16(bus, ir);
+        self.push32(bus, f.addr);
+        self.push16(bus, status);
+        if self.fault.take().is_some() {
+            // A second address error while stacking the first halts the CPU.
+            self.halted = true;
+            return;
+        }
+        self.pc = self.read32(bus, self.vbr.wrapping_add(VEC_ADDRESS_ERROR * 4));
+        self.flush_prefetch();
+        self.exception_taken = true;
     }
 
     fn illegal<B: Bus>(&mut self, bus: &mut B) {
