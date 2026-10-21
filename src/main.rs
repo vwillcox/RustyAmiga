@@ -520,6 +520,14 @@ fn main() {
                 Some((u32::from_str_radix(lo, 16).ok()?, u32::from_str_radix(hi, 16).ok()?))
             });
             amiga.breakpoint = std::env::var("BREAK_AT").ok().and_then(|v| u32::from_str_radix(&v, 16).ok());
+            amiga.trace_frames = std::env::var("TRACE_FRAMES")
+                .ok()
+                .and_then(|v| {
+                    let (a, b) = v.split_once('-')?;
+                    Some((a.parse().ok()?, b.parse().ok()?))
+                })
+                .unwrap_or((0, u64::MAX));
+            amiga.break_min_frame = std::env::var("BREAK_MIN_FRAME").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
         }
         let mut audio_peak = 0f32;
         let mut recorded: Vec<f32> = vec![];

@@ -15,6 +15,10 @@ use crate::keyboard::Keyboard;
 pub const PAL_CCK_RATE: u32 = 3_546_895;
 pub const NTSC_CCK_RATE: u32 = 3_579_545;
 const LINE_CCKS: u16 = 227;
+/// Colour clocks before a newly raised interrupt level reaches the CPU. Both
+/// F1 GP Circuits (polls VPOSR for line 0, where the vertical blank interrupt
+/// is raised) and Voyage (times a loop against CIA interrupts) need 3 or 4.
+const IPL_DELAY_CCK: u64 = 3;
 /// Colour clocks per MFM word at double density (16 bits * 2us).
 const DISK_WORD_CCKS: u32 = 113;
 const SPRITE_FIRST_LINE: u16 = 0x19;
@@ -80,6 +84,10 @@ pub struct Board {
     /// CPU clock (7.09 MHz PAL); the chipset runs at half this rate.
     pub cycles: u64,
     pub cck: u64,
+    /// Interrupt level the CPU sees, and the level Paula is changing to (since `ipl_since`).
+    ipl_out: u8,
+    ipl_pending: u8,
+    ipl_since: u64,
     pub vpos: u16,
     pub hpos: u16,
     pub lof: bool,
@@ -212,6 +220,9 @@ impl Board {
             overlay: true,
             cycles: 0,
             cck: 0,
+            ipl_out: 0,
+            ipl_pending: 0,
+            ipl_since: 0,
             vpos: 0,
             hpos: 0,
             lof: true,
@@ -404,8 +415,10 @@ impl Board {
 
     /// Wait for a free chip bus slot, then account for one bus cycle.
     fn chip_access(&mut self) {
-        // Chip bus cycles start on an even colour clock.
-        self.cycles = (self.cycles + 3) & !3;
+        // Chip bus cycles start on a colour clock boundary. (Not only even
+        // ones: Voyage's protection times a loop of 6-cycle-aligned DBF code
+        // against CIA timers and only decrypts with 58-cycle iterations.)
+        self.cycles = (self.cycles + 1) & !1;
         loop {
             self.sync();
             if !self.slot_busy() {
@@ -883,6 +896,25 @@ impl Board {
             }
         }
         v
+    }
+
+    /// Highest enabled and requested interrupt level (0 = none).
+    fn ipl_level(&self) -> u8 {
+        if self.intena & int::INTEN == 0 {
+            return 0;
+        }
+        let act = self.intena & self.intreq & 0x3fff;
+        if act == 0 {
+            return 0;
+        }
+        match 15 - act.leading_zeros() {
+            13 => 6,
+            11 | 12 => 5,
+            7..=10 => 4,
+            4..=6 => 3,
+            3 => 2,
+            _ => 1,
+        }
     }
 
     fn update_cia_irq(&mut self) {
@@ -1904,21 +1936,20 @@ impl Bus for Board {
     }
 
     fn ipl(&mut self) -> u8 {
-        if self.intena & int::INTEN == 0 {
-            return 0;
+        // Paula's IPL outputs follow INTREQ/INTENA a little late, and the 68000
+        // samples them before the end of an instruction: a new level only
+        // reaches the CPU a couple of colour clocks after it is raised. Code
+        // that polls VPOSR for line 0 relies on seeing that line before the
+        // vertical blank interrupt is taken (F1 GP Circuits).
+        let level = self.ipl_level();
+        if level != self.ipl_pending {
+            self.ipl_pending = level;
+            self.ipl_since = self.cck;
         }
-        let act = self.intena & self.intreq & 0x3fff;
-        if act == 0 {
-            return 0;
+        if level < self.ipl_out || self.cck >= self.ipl_since + IPL_DELAY_CCK {
+            self.ipl_out = level;
         }
-        match 15 - act.leading_zeros() {
-            13 => 6,
-            11 | 12 => 5,
-            7..=10 => 4,
-            4..=6 => 3,
-            3 => 2,
-            _ => 1,
-        }
+        self.ipl_out
     }
 
     fn reset_devices(&mut self) {
@@ -1934,6 +1965,10 @@ pub struct Amiga {
     pub pc_history: Option<std::collections::VecDeque<u32>>,
     /// Stop `run_frame` when the PC reaches this address.
     pub breakpoint: Option<u32>,
+    /// The breakpoint only fires from this frame on.
+    pub break_min_frame: u64,
+    /// TRACE_RANGE only logs in these frames (inclusive).
+    pub trace_frames: (u64, u64),
     pub break_hit: bool,
     /// Print registers every time the PC reaches this address.
     pub tracepoint: Option<u32>,
@@ -1945,7 +1980,7 @@ impl Amiga {
     pub fn new(cfg: Config, rom: Vec<u8>) -> Amiga {
         let mut cpu = crate::cpu::Cpu::with_model(cfg.cpu);
         cpu.fpu = cfg.fpu;
-        let mut a = Amiga { cpu, board: Board::new(cfg, rom), pc_history: None, breakpoint: None, break_hit: false, tracepoint: None, trace_range: None };
+        let mut a = Amiga { cpu, board: Board::new(cfg, rom), pc_history: None, breakpoint: None, break_min_frame: 0, trace_frames: (0, u64::MAX), break_hit: false, tracepoint: None, trace_range: None };
         a.hard_reset();
         a
     }
@@ -1980,13 +2015,16 @@ impl Amiga {
             }
             if let Some((lo, hi)) = self.trace_range {
                 let pc = self.cpu.pc;
-                if (lo..hi).contains(&pc) {
+                if (lo..hi).contains(&pc) && self.trace_frames.0 <= self.board.frame_count && self.board.frame_count <= self.trace_frames.1 {
                     let c = &self.cpu;
                     let (t, _) = crate::disasm::disasm(pc, &|x| self.board.peek16(x));
-                    eprintln!("{pc:06x} {t:<32} D={:08x?} A={:08x?}", c.d, c.a);
+                    eprintln!(
+                        "{pc:06x} {t:<32} v={} h={} cyc={} D={:08x?} A={:08x?}",
+                        self.board.vpos, self.board.hpos, self.board.cycles, c.d, c.a
+                    );
                 }
             }
-            if self.breakpoint == Some(self.cpu.pc) && !self.break_hit {
+            if self.breakpoint == Some(self.cpu.pc) && !self.break_hit && self.board.frame_count >= self.break_min_frame {
                 self.break_hit = true;
                 return;
             }

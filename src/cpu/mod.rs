@@ -123,6 +123,13 @@ pub struct Cpu {
     pq_addr: u32,
     pq: [u16; 2],
     pq_valid: bool,
+    /// The second word has been fetched. The 68000 refills the queue at the end
+    /// of most instructions, after their own writes, so the refill is made
+    /// when the word is next needed.
+    pq1_valid: bool,
+    /// The word at `pq_addr` has not been fetched yet (after a branch
+    /// displacement, which the 68000 does not prefetch past).
+    pq0_pending: bool,
 
     pub model: CpuModel,
     // 68010+/68020 control registers.
@@ -320,11 +327,30 @@ impl Cpu {
             self.pq[0] = bus.read16(self.pc);
             self.pq[1] = bus.read16(self.pc.wrapping_add(2));
             self.pq_valid = true;
+            self.pq1_valid = true;
+            self.pq0_pending = false;
+        } else if self.pq0_pending {
+            self.pq[0] = bus.read16(self.pq_addr);
+            self.pq0_pending = false;
         }
         let v = self.pq[0];
-        self.pq[0] = self.pq[1];
+        self.pq[0] = if self.pq1_valid { self.pq[1] } else { bus.read16(self.pq_addr.wrapping_add(2)) };
+        self.pq1_valid = false;
         self.pq_addr = self.pq_addr.wrapping_add(2);
-        self.pq[1] = bus.read16(self.pq_addr.wrapping_add(2));
+        self.pc = self.pc.wrapping_add(2);
+        v
+    }
+
+    /// Fetch a branch displacement: a taken branch refills the queue at its
+    /// target without prefetching past the displacement, so the following word
+    /// is only read if execution falls through to it.
+    fn fetch16_disp<B: Bus>(&mut self, bus: &mut B) -> u16 {
+        if self.is_020() || !self.pq_valid || self.pq_addr != self.pc || self.pq0_pending || self.pq1_valid {
+            return self.fetch16(bus);
+        }
+        let v = self.pq[0];
+        self.pq0_pending = true;
+        self.pq_addr = self.pq_addr.wrapping_add(2);
         self.pc = self.pc.wrapping_add(2);
         v
     }

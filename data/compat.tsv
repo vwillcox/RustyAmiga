@@ -112,7 +112,7 @@ First Demos (Commodore-Amiga, 1984, Amiga)	ok	hard disk (A590): Workbench drawer
 Zero Gravity 3 (Scoopex, 1997, Amiga)	ok	reaches content (AGA, automated)
 Xenomorphs (Scoopex, 1989, Amiga)	ok	title screen reached from hard disk (A590, automated)
 Wessyde (RNO, 2004, Amiga)	ok	reaches content (AGA, automated)
-Voyage (Razor 1911, 1991, Amiga)	blank	trace-decoder protection fails (open issue)
+Voyage (Razor 1911, 1991, Amiga)	ok	title screen reached (trace-decoder protection passes)
 Vertical Insanity (Razor 1911, 1990, Amiga)	ok	title screen reached from hard disk (A590, automated)
 Vectrex (Scoopex, 1989, Amiga)	ok	title screen reached from hard disk (A590, automated)
 Under Pressure (Darkage, 1999, Amiga)	ok	reaches content (AGA, automated)

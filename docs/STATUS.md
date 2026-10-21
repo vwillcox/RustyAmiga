@@ -10,9 +10,9 @@
   Packages built on host folders (AROS, Amiga 4000 Enhanced 3.X) need `Amiga Files/Shared/dir` in `./dir`.
 - Headless test options are listed by `--help`. They include `--headless`, `--screenshot`,
   `--shot-every`, `--wav`, `--type FRAME:TEXT` and `--debug-dump`.
-- Debugging environment variables: `BREAK_AT`, `TRACE_AT`, `TRACE_RANGE=lo-hi` (log every instruction in a
-  range), `DISASM_AT`/`DISASM_N`,
-  `AMIGA_LOG_EXCEPTIONS`, `AMIGA_LOG_DISK`.
+- Debugging environment variables: `BREAK_AT` (with `BREAK_MIN_FRAME` to skip earlier hits), `TRACE_AT`,
+  `TRACE_RANGE=lo-hi` (log every instruction in a range, with beam position and cycle count; `TRACE_FRAMES=a-b`
+  limits it to those frames), `DISASM_AT`/`DISASM_N`, `DUMP_MEM=addr:len`, `AMIGA_LOG_EXCEPTIONS`, `AMIGA_LOG_DISK`.
 
 ## Fixed in the 2026-10-19 session (chipset audit)
 
@@ -83,6 +83,12 @@ Amiga Forever ships AROS and the enhanced OS 3.X installation as plain folders (
 ### CD32 (no CD drive yet)
 The CD32 model has Akiko at `$B80000` (`src/akiko.rs`): the chip ID, the chunky-to-planar converter, and the I2C settings NVRAM (a 24C08, kept in memory). The extended ROM loads automatically. Without a CD drive the machine boots to its "Amiga CD32" disc animation. The Amiga Forever DVD has no CD images to test a drive with.
 
+### 68000 bus timing (Voyage)
+Voyage (Razor 1911) now runs. Its protection needed three timing details:
+- **Prefetch.** The 68000 refills the second prefetch word at the end of an instruction, after the instruction's own writes. Voyage turns on trace mode with an `ORI #$A01C,SR` whose immediate it writes from the instruction just before. A taken branch also no longer prefetches past its displacement, and DBcc takes its 10 cycles.
+- **Chip bus.** CPU accesses start on any colour clock, not only even ones. The protection builds its decryption key from where two CIA timer interrupts fall in a copy loop, and only the 58-cycle loop that this gives decrypts. The key was found by modelling the key derivation and testing candidate keys.
+- **Interrupt latency.** A newly raised interrupt level reaches the CPU 3 colour clocks after Paula raises it. F1 GP Circuits polls VPOSR for line 0, where the vertical blank interrupt is raised, and hung without the delay. Voyage also needs 3 or 4.
+
 ### Remaining open items
 - **Incision works but precalculates for a long time.** It renders its soundtrack first; at 64x the intro starts by frame 9000.
 - **Not emulated:** the CD32's CD-ROM drive, the CDTV, PowerPC boards, UAE's RTG card (uaegfx), and the user's own shared folder (`<harddrive root="shared"/>`, which is skipped). The Walker prototype's folders are not on the AF 11 DVD.
@@ -91,7 +97,6 @@ The CD32 model has Akiko at `$B80000` (`src/akiko.rs`): the chip ID, the chunky-
 ## Known issues and open items
 
 - **Powerball works (not a regression).** Its intro sequence includes black gaps, and the menu only appears at about frame 7000 (140 s), or frame 5750 with turbo floppy. The 90 s single-frame check landed on a black gap.
-- **Voyage (Razor 1911): protection fails.** It uses a trace-mode decoder that modifies its handler's own code. Prefetch emulation helped, but the decrypted check still fails and the demo resets. The next suspect is the key in d6, which may be derived from timing.
 - **Tie Break works but is slow.** Its trackloader takes about 100 s at authentic disk speed, so the 90 s automated test marked it blank. Use warp (End).
 - **Rink-a-Dink works.** It waits for a left mouse click after the intro, so the automated test showed black.
 - **Logica Dialoga 2.0 (diagnostic ROM) works.** Its colour-bar test pattern is followed by the title screen. It continues on a mouse button or fire button; the keyboard is only enabled after its keyboard test.

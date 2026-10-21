@@ -676,7 +676,7 @@ impl Cpu {
             }
             if mode == 1 {
                 // DBcc
-                let disp = self.fetch16(bus) as i16 as i32 as u32;
+                let disp = self.fetch16_disp(bus) as i16 as i32 as u32;
                 if self.cond(cc) {
                     bus.idle(4);
                     return;
@@ -685,6 +685,7 @@ impl Cpu {
                 let cnt = (self.d[r] as u16).wrapping_sub(1);
                 self.d[r] = (self.d[r] & 0xffff_0000) | cnt as u32;
                 if cnt != 0xffff {
+                    bus.idle(2);
                     self.pc = self.instr_pc.wrapping_add(2).wrapping_add(disp);
                 } else {
                     bus.idle(6);
