@@ -86,7 +86,7 @@ impl Cpu {
                 _ => ccr ^ imm,
             };
             self.set_ccr(v);
-            bus.idle(8);
+            bus.idle(12);
             return;
         }
         if op & 0x00ff == 0x007c && matches!(kind, 0 | 1 | 5) {
@@ -101,7 +101,7 @@ impl Cpu {
                 _ => sr ^ imm,
             };
             self.set_sr(v);
-            bus.idle(8);
+            bus.idle(12);
             return;
         }
         let Some(sz) = Size::from_bits(op >> 6) else {
@@ -173,10 +173,16 @@ impl Cpu {
                 2 => self.d[r] &= !mask,
                 _ => self.d[r] |= mask,
             }
-            bus.idle(if kind == 2 { 6 } else { 4 });
+            // Bit numbers below 16 save two cycles.
+            let low = if bit & 31 < 16 { 2 } else { 0 };
+            bus.idle(if kind == 2 { 6 } else { 4 } - low);
             return;
         }
         let ea = self.ea(bus, mode, reg, Size::B);
+        if let Ea::Imm(_) = ea {
+            // BTST Dn,#imm
+            bus.idle(2);
+        }
         let v = self.read_ea(bus, ea, Size::B);
         let mask = 1u32 << (bit & 7);
         self.z = v & mask == 0;
@@ -297,6 +303,9 @@ impl Cpu {
         if op & 0x01c0 == 0x01c0 {
             // LEA
             let ea = self.ea(bus, mode, reg, Size::L);
+            if mode == 6 || (mode == 7 && reg == 3) {
+                bus.idle(2);
+            }
             if let Ea::M(addr) = ea {
                 self.a[((op >> 9) & 7) as usize] = addr;
             } else {
@@ -309,19 +318,20 @@ impl Cpu {
             let ea = self.ea(bus, mode, reg, Size::W);
             let bound = self.read_ea(bus, ea, Size::W) as i16;
             let dn = self.d[((op >> 9) & 7) as usize] as i16;
-            bus.idle(6);
             self.z = dn == 0;
             self.n = false;
             self.v = false;
             self.c = false;
-            if dn < 0 {
-                self.n = true;
+            if dn < 0 || dn > bound {
+                self.n = dn < 0;
+                // The bound is checked first. A negative register within the
+                // bound traps two cycles later, unless bound - Dn overflowed.
+                let early = dn > bound || bound as i32 - dn as i32 > i16::MAX as i32;
+                bus.idle(if early { 4 } else { 6 });
                 let pc = self.pc;
                 self.exception(bus, VEC_CHK, pc);
-            } else if dn > bound {
-                self.n = false;
-                let pc = self.pc;
-                self.exception(bus, VEC_CHK, pc);
+            } else {
+                bus.idle(6);
             }
             return;
         }
@@ -429,6 +439,9 @@ impl Cpu {
                     } else {
                         // PEA
                         let ea = self.ea(bus, mode, reg, Size::L);
+                        if mode == 6 || (mode == 7 && reg == 3) {
+                            bus.idle(2);
+                        }
                         if let Ea::M(addr) = ea {
                             self.push32(bus, addr);
                         } else {
@@ -492,10 +505,33 @@ impl Cpu {
         let reg = op & 7;
         match op & 0xffc0 {
             0x4e80 | 0x4ec0 => {
-                // JSR / JMP
-                let ea = self.ea(bus, mode, reg, Size::L);
-                let Ea::M(target) = ea else {
-                    return self.illegal(bus);
+                // JSR / JMP. Like a branch displacement, the last extension word
+                // is not prefetched past: the queue refills at the target.
+                let target = match (mode, reg) {
+                    (5, _) => {
+                        let d = self.fetch16_disp(bus) as i16 as i32 as u32;
+                        bus.idle(2);
+                        self.a[reg as usize].wrapping_add(d)
+                    }
+                    (7, 0) => {
+                        let a = self.fetch16_disp(bus) as i16 as i32 as u32;
+                        bus.idle(2);
+                        a
+                    }
+                    (7, 1) => {
+                        let hi = self.fetch16(bus) as u32;
+                        hi << 16 | self.fetch16_disp(bus) as u32
+                    }
+                    (7, 2) => {
+                        let base = self.pc;
+                        let d = self.fetch16_disp(bus) as i16 as i32 as u32;
+                        bus.idle(2);
+                        base.wrapping_add(d)
+                    }
+                    _ => match self.ea(bus, mode, reg, Size::L) {
+                        Ea::M(t) => t,
+                        _ => return self.illegal(bus),
+                    },
                 };
                 if op & 0x40 == 0 {
                     let pc = self.pc;
@@ -555,7 +591,10 @@ impl Cpu {
                 if !self.s {
                     return self.privilege_violation(bus);
                 }
-                let v = self.fetch16(bus);
+                // The immediate is already in the queue, which a stopped 68000
+                // does not refill.
+                let v = self.fetch16_disp(bus);
+                bus.idle(4);
                 self.set_sr(v);
                 self.stopped = true;
             }
@@ -744,7 +783,7 @@ impl Cpu {
         let base = self.pc;
         let mut disp = op as i8 as i32 as u32;
         if disp == 0 {
-            disp = self.fetch16(bus) as i16 as i32 as u32;
+            disp = self.fetch16_disp(bus) as i16 as i32 as u32;
         } else if disp == 0xffff_ffff && self.is_020() {
             disp = self.fetch32(bus);
         }
@@ -753,14 +792,15 @@ impl Cpu {
         if cc == 1 {
             // BSR
             let ret = self.pc;
+            bus.idle(2);
             self.push32(bus, ret);
             self.pc = target;
-            // Refilling the prefetch queue accounts for the branch time.
             return;
         }
         if self.cond(cc) {
+            // Two internal cycles, then the queue refills at the target.
+            bus.idle(2);
             self.pc = target;
-            // Refilling the prefetch queue accounts for the branch time.
         } else {
             bus.idle(4);
         }
@@ -838,18 +878,17 @@ impl Cpu {
         let q = dst / src;
         let r = dst % src;
         self.c = false;
+        bus.idle(divu_cycles(dst, src as u16) - 4);
         if q > 0xffff {
             self.v = true;
             self.n = true;
             self.z = false;
-            bus.idle(6);
             return;
         }
         self.v = false;
         self.n = q & 0x8000 != 0;
         self.z = q == 0;
         self.d[dn] = r << 16 | q;
-        bus.idle(136);
     }
 
     fn divs<B: Bus>(&mut self, bus: &mut B, op: u16) {
@@ -866,11 +905,11 @@ impl Cpu {
         }
         let dst = self.d[dn] as i32;
         self.c = false;
+        bus.idle(divs_cycles(dst, src as i16) - 4);
         if dst == i32::MIN && src == -1 {
             self.v = true;
             self.n = false;
             self.z = true;
-            bus.idle(14);
             return;
         }
         let q = dst / src;
@@ -879,14 +918,12 @@ impl Cpu {
             self.v = true;
             self.n = true;
             self.z = false;
-            bus.idle(14);
             return;
         }
         self.v = false;
         self.n = q < 0;
         self.z = q == 0;
         self.d[dn] = (r as u32) << 16 | (q as u32 & 0xffff);
-        bus.idle(154);
     }
 
     // ---- line 9 / D: SUB, ADD and friends -----------------------------------
@@ -1260,4 +1297,58 @@ impl Cpu {
         self.set_nz(v, sz);
         v
     }
+}
+
+/// Cycles of a 68000 DIVU after the operand is read (including the final
+/// prefetch), which depend on the operands: the microcode's shift-and-subtract loop takes longer for
+/// each quotient bit that does not need a subtraction. After Jorge Cwik's
+/// analysis of the microcode.
+fn divu_cycles(dividend: u32, divisor: u16) -> u32 {
+    let divisor = divisor as u32;
+    if dividend >> 16 >= divisor {
+        return 10; // overflow
+    }
+    let mut mcycles = 38;
+    let hdivisor = divisor << 16;
+    let mut dividend = dividend;
+    for _ in 0..15 {
+        let carry = dividend & 0x8000_0000 != 0;
+        dividend <<= 1;
+        if carry {
+            dividend = dividend.wrapping_sub(hdivisor);
+        } else {
+            mcycles += 2;
+            if dividend >= hdivisor {
+                dividend -= hdivisor;
+                mcycles -= 1;
+            }
+        }
+    }
+    mcycles * 2
+}
+
+/// Cycles of a 68000 DIVS, as for `divu_cycles`.
+fn divs_cycles(dividend: i32, divisor: i16) -> u32 {
+    let mut mcycles = if dividend < 0 { 7 } else { 6 };
+    let adividend = dividend.unsigned_abs();
+    let adivisor = divisor.unsigned_abs() as u32;
+    if adividend >> 16 >= adivisor {
+        return (mcycles + 2) * 2; // overflow
+    }
+    let mut aquot = adividend / adivisor;
+    mcycles += 55;
+    if divisor >= 0 {
+        if dividend >= 0 {
+            mcycles -= 1;
+        } else {
+            mcycles += 1;
+        }
+    }
+    for _ in 0..15 {
+        if aquot & 0x8000 == 0 {
+            mcycles += 1;
+        }
+        aquot <<= 1;
+    }
+    mcycles * 2
 }

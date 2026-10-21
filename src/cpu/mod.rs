@@ -471,6 +471,19 @@ impl Cpu {
         v
     }
 
+    /// Word reads still owed to fill the two-word prefetch queue at PC, which a
+    /// 68000 does before an instruction ends (our queue fills lazily). For
+    /// cycle-count tests.
+    pub fn prefetch_reads_owed(&self) -> u32 {
+        if !self.pq_valid || self.pq_addr != self.pc || self.pq0_pending {
+            2
+        } else if self.pq1_valid {
+            0
+        } else {
+            1
+        }
+    }
+
     /// Discard the prefetch queue (reset, or tests that load memory directly).
     pub fn flush_prefetch(&mut self) {
         self.pq_valid = false;
@@ -650,7 +663,7 @@ impl Cpu {
         let old_sr = self.sr();
         self.set_supervisor(true);
         self.t = false;
-        bus.idle(4);
+        bus.idle(6);
         if self.is_020() {
             // Format 2 frames carry the address of the faulting instruction.
             let format = match vector {

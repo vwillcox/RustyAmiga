@@ -1,5 +1,7 @@
 //! Runs the SingleStepTests 68000 suite (https://github.com/SingleStepTests/m68000).
-//! Set SST_DIR to the directory containing the v1/*.json.bin files.
+//! Set SST_DIR to the directory containing the v1/*.json.bin files. Each case
+//! checks registers, memory and the instruction's cycle count. Address error
+//! cases are skipped unless SST_ADDR_ERR is set ("only" runs just those).
 
 use amiga::bus::Bus;
 use amiga::cpu::Cpu;
@@ -7,21 +9,39 @@ use std::collections::HashMap;
 
 struct TestBus {
     mem: HashMap<u32, u8>,
+    /// CPU clocks used: four per bus cycle plus internal cycles.
+    cycles: u32,
+}
+
+impl TestBus {
+    fn get(&self, a: u32) -> u8 {
+        *self.mem.get(&(a & 0xff_ffff)).unwrap_or(&0)
+    }
+    fn set(&mut self, a: u32, v: u8) {
+        self.mem.insert(a & 0xff_ffff, v);
+    }
 }
 
 impl Bus for TestBus {
     fn read8(&mut self, a: u32) -> u8 {
-        *self.mem.get(&(a & 0xff_ffff)).unwrap_or(&0)
+        self.cycles += 4;
+        self.get(a)
     }
     fn read16(&mut self, a: u32) -> u16 {
-        (self.read8(a) as u16) << 8 | self.read8(a.wrapping_add(1)) as u16
+        self.cycles += 4;
+        (self.get(a) as u16) << 8 | self.get(a.wrapping_add(1)) as u16
     }
     fn write8(&mut self, a: u32, v: u8) {
-        self.mem.insert(a & 0xff_ffff, v);
+        self.cycles += 4;
+        self.set(a, v);
     }
     fn write16(&mut self, a: u32, v: u16) {
-        self.write8(a, (v >> 8) as u8);
-        self.write8(a.wrapping_add(1), v as u8);
+        self.cycles += 4;
+        self.set(a, (v >> 8) as u8);
+        self.set(a.wrapping_add(1), v as u8);
+    }
+    fn idle(&mut self, n: u32) {
+        self.cycles += n;
     }
 }
 
@@ -94,7 +114,7 @@ fn run_file(path: &std::path::Path, verbose: usize) -> (usize, usize, usize) {
         let fin = r.state();
         r.u32();
         r.u32();
-        let _cycles = r.u32();
+        let want_cycles = r.u32();
         let ntx = r.u32();
         let mut addr_err = false;
         for _ in 0..ntx {
@@ -127,7 +147,7 @@ fn run_file(path: &std::path::Path, verbose: usize) -> (usize, usize, usize) {
             let ipc = init.regs[18].wrapping_sub(4);
             println!("AE {}|{:+}|{:04x}", name, pc.wrapping_sub(ipc) as i32, st);
         }
-        let mut bus = TestBus { mem: HashMap::new() };
+        let mut bus = TestBus { mem: HashMap::new(), cycles: 0 };
         let pc = init.regs[18];
         bus.write16(pc.wrapping_sub(4), init.prefetch[0] as u16);
         bus.write16(pc.wrapping_sub(2), init.prefetch[1] as u16);
@@ -142,7 +162,13 @@ fn run_file(path: &std::path::Path, verbose: usize) -> (usize, usize, usize) {
         cpu.other_sp = init.regs[16];
         cpu.set_sr(init.regs[17] as u16);
         cpu.pc = pc.wrapping_sub(4);
+        bus.cycles = 0;
         cpu.step(&mut bus);
+        // Our queue starts empty here (two reads the 68000 had already made)
+        // and fills lazily, so count the reads it still owes. A stopped 68000
+        // does not refill it.
+        let owed = if cpu.stopped { 0 } else { cpu.prefetch_reads_owed() };
+        let got_cycles = bus.cycles as i64 - 8 + 4 * owed as i64;
 
         let mut got = [0u32; 19];
         got[..8].copy_from_slice(&cpu.d);
@@ -164,8 +190,11 @@ fn run_file(path: &std::path::Path, verbose: usize) -> (usize, usize, usize) {
                 errs.push(format!("{}: got {:08x} want {:08x}", NAMES[i], g, e));
             }
         }
+        if !addr_err && got_cycles != want_cycles as i64 {
+            errs.push(format!("cycles: got {} want {}", got_cycles, want_cycles));
+        }
         for &(a, d) in &fin.ram {
-            let g = bus.read8(a);
+            let g = bus.get(a);
             if g != d {
                 errs.push(format!("ram {:06x}: got {:02x} want {:02x}", a, g, d));
             }
