@@ -8,6 +8,7 @@ pub mod cpu;
 pub mod disasm;
 pub mod floppy;
 pub mod gayle;
+pub mod dirfs;
 pub mod hdf;
 pub mod panel;
 pub mod keyboard;

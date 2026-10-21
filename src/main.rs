@@ -87,7 +87,7 @@ struct Args {
     #[arg(long)]
     shot_every: Option<u64>,
     /// Headless: type keys at a frame, e.g. "1400:^D" or "1500:say hello\n".
-    /// `^X` is Ctrl+X, `\n` is Return. May be given several times.
+    /// `^X` is Ctrl+X, `\AX` is Left Amiga+X, `\n` is Return. May be given several times.
     #[arg(long = "type")]
     type_keys: Vec<String>,
     /// Headless: record audio output to a 16-bit stereo WAV file.
@@ -103,6 +103,10 @@ struct Args {
     /// order. Writes stay in memory and are not saved back.
     #[arg(long = "hdf")]
     hdf: Vec<PathBuf>,
+    /// Host folders to mount as hard disks after the HDFs (built into an FFS
+    /// volume named after the folder when the machine starts; writes stay in memory).
+    #[arg(long = "dir-hd")]
+    dir_hd: Vec<PathBuf>,
     /// Boot ROM for the SCSI controller (default: amiga-boot-a590.rom in --rom-dir).
     #[arg(long)]
     scsi_rom: Option<PathBuf>,
@@ -184,6 +188,20 @@ fn rom_dirs(args: &Args) -> Vec<PathBuf> {
 
 /// Locate an Amiga Forever shared file (`kind` is "hdf" or "adf"), such as
 /// `workbench-135.hdf`, in ./<kind> or next to the ROM directories.
+/// Newest AROS main ROM (`aros-YYYYMMDD.rom`) in the ROM directories.
+fn find_aros_rom(args: &Args) -> Option<PathBuf> {
+    rom_dirs(args)
+        .iter()
+        .filter_map(|d| std::fs::read_dir(d).ok())
+        .flatten()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            let n = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            n.starts_with("aros-") && n.ends_with(".rom") && !n.ends_with("-ext.rom")
+        })
+        .max_by_key(|p| p.file_name().map(|n| n.to_owned()))
+}
+
 fn find_shared(args: &Args, kind: &str, name: &str) -> Option<PathBuf> {
     let mut dirs = vec![PathBuf::from(kind)];
     for d in rom_dirs(args) {
@@ -193,7 +211,7 @@ fn find_shared(args: &Args, kind: &str, name: &str) -> Option<PathBuf> {
     if let Some(home) = std::env::var_os("HOME") {
         dirs.push(PathBuf::from(home).join(".config/amiga").join(kind));
     }
-    dirs.into_iter().map(|d| d.join(name)).find(|p| p.is_file())
+    dirs.into_iter().map(|d| d.join(name)).find(|p| p.exists())
 }
 
 fn find_rom(args: &Args, candidates: &[&str]) -> PathBuf {
@@ -240,8 +258,8 @@ fn main() {
         Some(p) if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("rp9")) => {
             let r = amiga::rp9::load(p).unwrap_or_else(|e| die(format!("{}: {e}", p.display())));
             log::info!("RP9: {} ({})", r.title, r.system);
-            if r.floppy_names.is_empty() && r.harddrives.is_empty() && r.boot_hdf.is_none() && r.boot_adf.is_none() {
-                die(format!("{}: {}", p.display(), r.unsupported_reason().unwrap_or_default()));
+            if let Some(why) = r.unsupported_reason() {
+                die(format!("{}: {why}", p.display()));
             }
             for (name, data) in &r.floppies {
                 floppies.push(frontend::SwapDisk { name: name.clone(), data: data.clone(), path: None });
@@ -277,7 +295,10 @@ fn main() {
                 Some(r) if args.model.is_none() || r.model() == Some(model) => r.rom_candidates(),
                 _ => default_roms(model),
             };
-            find_rom(&args, &cands)
+            match rp9.as_ref().and_then(|r| r.rom.as_deref()) {
+                Some(r) if r.starts_with("aros") => find_aros_rom(&args).unwrap_or_else(|| die("this package needs an AROS ROM (aros-*.rom)")),
+                _ => find_rom(&args, &cands),
+            }
         }
     };
     let rom = amiga::rom::load(&rom_path, args.rom_key.as_deref()).unwrap_or_else(|e| die(e));
@@ -388,6 +409,13 @@ fn main() {
             log::info!("boot hard disk {}", p.display());
             hdfs.push((format!("workbench-{b}.hdf"), data, true));
         }
+        for (folder, volume) in &r.host_dirs {
+            let p = find_shared(&args, "dir", folder).unwrap_or_else(|| {
+                die(format!("this title uses the {folder} folder; put it in ./dir (from the Amiga Forever \"Shared/dir\" folder)"))
+            });
+            let data = amiga::dirfs::build(&p, volume).unwrap_or_else(|e| die(e));
+            hdfs.push((format!("{folder} (folder)"), data, false));
+        }
         for (name, data) in &r.hdfs {
             hdfs.push((name.clone(), data.clone(), false));
         }
@@ -395,6 +423,11 @@ fn main() {
     for p in &args.hdf {
         let data = std::fs::read(p).unwrap_or_else(|e| die(format!("{}: {e}", p.display())));
         hdfs.push((p.display().to_string(), data, false));
+    }
+    for p in &args.dir_hd {
+        let vol = p.canonicalize().ok().and_then(|c| c.file_name().map(|n| n.to_string_lossy().into_owned()));
+        let data = amiga::dirfs::build(p, vol.as_deref().unwrap_or("Work")).unwrap_or_else(|e| die(e));
+        hdfs.push((format!("{} (folder)", p.display()), data, false));
     }
 
     // Make every image mountable by Commodore's drivers: bare partitions get an

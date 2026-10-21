@@ -80,14 +80,24 @@ impl Keyboard {
 pub fn text_to_keys(text: &str) -> Vec<(u8, bool)> {
     const SHIFT: u8 = 0x60;
     const CTRL: u8 = 0x63;
+    const LAMIGA: u8 = 0x66;
     let mut out = vec![];
     let text = text.replace("\\n", "\n");
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
-        if c == '^' {
+        // ^X is Ctrl+X; \\AX is Left Amiga+X (e.g. \\Av answers a requester's OK).
+        let modifier = match c {
+            '^' => Some(CTRL),
+            '\\' if chars.peek() == Some(&'A') => {
+                chars.next();
+                Some(LAMIGA)
+            }
+            _ => None,
+        };
+        if let Some(m) = modifier {
             if let Some(n) = chars.next() {
                 if let Some((k, _)) = char_key(n.to_ascii_lowercase()) {
-                    out.extend([(CTRL, true), (k, true), (k, false), (CTRL, false)]);
+                    out.extend([(m, true), (k, true), (k, false), (m, false)]);
                 }
             }
             continue;

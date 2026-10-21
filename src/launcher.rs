@@ -145,9 +145,9 @@ const MODELS: &[(Model, &str)] = &[
     (Model::A2000, "Amiga 2000"),
     (Model::A500Plus, "Amiga 500 Plus"),
     (Model::A600, "Amiga 600"),
-    (Model::A1200, "Amiga 1200 (coming: 68020/AGA)"),
-    (Model::A3000, "Amiga 3000 (coming: 68030)"),
-    (Model::A4000, "Amiga 4000 (coming: 68040/AGA)"),
+    (Model::A1200, "Amiga 1200"),
+    (Model::A3000, "Amiga 3000"),
+    (Model::A4000, "Amiga 4000"),
     (Model::Cd32, "CD32 (coming: 68020/AGA/CD)"),
 ];
 
@@ -367,6 +367,19 @@ impl App {
         names.iter().find_map(|n| self.roms.iter().find(|r| r.path.file_name().is_some_and(|f| f == *n)).map(|r| r.path.clone()))
     }
 
+    /// Newest AROS main ROM (`aros-YYYYMMDD.rom`; the extension ROM is found next to it).
+    fn find_aros_rom(&self) -> Option<PathBuf> {
+        self.roms
+            .iter()
+            .map(|r| &r.path)
+            .filter(|p| {
+                let n = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                n.starts_with("aros-") && n.ends_with(".rom") && !n.ends_with("-ext.rom")
+            })
+            .max_by_key(|p| p.file_name().map(|n| n.to_owned()))
+            .cloned()
+    }
+
     fn apply_preset(&mut self, p: &Preset) {
         self.machine.model = p.model;
         self.machine.rom = self.find_rom(p.roms);
@@ -381,10 +394,19 @@ impl App {
         let cfg = amiga::config::Config::for_model(model);
         Machine {
             model,
-            rom: self.find_rom(&t.rom_candidates()),
+            rom: if t.rom.as_deref().is_some_and(|r| r.starts_with("aros")) {
+                self.find_aros_rom()
+            } else {
+                self.find_rom(&t.rom_candidates())
+            },
             chip_kb: if t.chip_ram > 0 { t.chip_ram / 1024 } else { cfg.chip_kb },
             slow_kb: if t.slow_ram > 0 { t.slow_ram / 1024 } else { cfg.slow_kb },
-            fast_kb: (t.fast_ram / 1024).min(8192),
+            // --fast sets motherboard RAM on the A3000/A4000: keep the model's.
+            fast_kb: if t.fast_ram > 0 {
+                (t.fast_ram / 1024).min(8192)
+            } else {
+                cfg.mb_kb
+            },
             drives: (t.extra_drives + 1).max(if t.floppy_names.len() > 1 { 2 } else { 1 }).min(4),
             ntsc: false,
             turbo_floppy: t.turbo_floppy,
@@ -455,6 +477,9 @@ impl App {
                             let c = amiga::config::Config::for_model(*model);
                             m.chip_kb = c.chip_kb;
                             m.slow_kb = c.slow_kb;
+                            if model.addr32() {
+                                m.fast_kb = c.mb_kb;
+                            }
                         }
                     });
                 }

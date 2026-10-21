@@ -7,6 +7,7 @@
 - `--hdf image.hdf` (repeatable) attaches hard disks to an A590/A2091 SCSI controller, SCSI IDs 0 up.
   RP9 hard disk titles also need the shared Amiga Forever boot disks (`workbench-135.hdf` etc. from
   `Amiga Files/Shared/hdf` on the AF DVD) in `./hdf`.
+  Packages built on host folders (AROS, Amiga 4000 Enhanced 3.X) need `Amiga Files/Shared/dir` in `./dir`.
 - Headless test options are listed by `--help`. They include `--headless`, `--screenshot`,
   `--shot-every`, `--wav`, `--type FRAME:TEXT` and `--debug-dump`.
 - Debugging environment variables: `BREAK_AT`, `TRACE_AT`, `TRACE_RANGE=lo-hi` (log every instruction in a
@@ -73,9 +74,15 @@ Paula also now finishes the current word when a channel's DMA is switched off, t
 - Denise now takes the horizontal H8 bits from DIWHIGH. A stop position left of the start (Mental's `$00A`) keeps the window open to the end of the line, because the window is a flip-flop.
 - AGA BSCAN2 (FMODE bit 14) scan doubling: every plane adds BPL1MOD and BPL2MOD on alternate lines, with the parity counted from the DIWSTRT line. Mental, Goa, Lapsuus, Ocean Machine, Burning Chrome, Under Pressure and Sumea use it and showed vertical streaks or garbage. Fatman's title picture is no longer cut off.
 
+### Host folders as hard disks
+Amiga Forever ships AROS and the enhanced OS 3.X installation as plain folders (`Amiga Files/Shared/dir` on the DVD: `AROS`, `System` and `Work`), which UAE mounts with its own filesystem handler. Put them in `./dir`. When the machine starts, each folder is built into an international FFS (`DOS\3`) partition image in memory (`src/dirfs.rs`), which Kickstart's FFS mounts like any other disk. `--dir-hd FOLDER` does the same for any folder.
+- Writes stay in memory. Names longer than 30 characters are shortened, and host names are converted to Latin-1. There are no Amiga protection bits on the host, so files in S: and text files that start like scripts get the S bit.
+- **Amiga 4000 Enhanced 3.X** boots the 3.X ROM from System with Work as DH1. It first shows "uaegfx.card could not be opened" (no RTG card); after OK (`--type 1000:\Av` headless), Workbench comes up on AGA.
+- **AROS** boots from its folder to Wanderer on an A4000 given 16 MB motherboard and 64 MB Zorro III RAM. With the default 4 MB, its stacks ended up in chip RAM, and remapping its true-colour images for AGA took minutes.
+
 ### Remaining open items
 - **Incision still precalculates at 90 s.** It renders its soundtrack first; at 64x this finishes around frame 7500.
-- **Not emulated:** CD32/CDTV, PowerPC boards, and Amiga Forever host-folder drives (A4000 Enhanced, AROS, Walker).
+- **Not emulated:** CD32/CDTV, PowerPC boards, UAE's RTG card (uaegfx), and the user's own shared folder (`<harddrive root="shared"/>`, which is skipped). The Walker prototype's folders are not on the AF 11 DVD.
 - **Not Amiga software:** the Videos and Gallery packages (DVD video and host images for Amiga Forever's player). The emulator now refuses them with that explanation.
 
 ## Known issues and open items
@@ -84,9 +91,7 @@ Paula also now finishes the current word when a channel's DMA is switched off, t
 - **Voyage (Razor 1911): protection fails.** It uses a trace-mode decoder that modifies its handler's own code. Prefetch emulation helped, but the decrypted check still fails and the demo resets. The next suspect is the key in d6, which may be derived from timing.
 - **Tie Break works but is slow.** Its trackloader takes about 100 s at authentic disk speed, so the 90 s automated test marked it blank. Use warp (End).
 - **Rink-a-Dink works.** It waits for a left mouse click after the intro, so the automated test showed black.
-- **AROS:** the extension ROM is mapped, but the screen stays dark. Not yet diagnosed.
 - **Logica Dialoga 2.0 (diagnostic ROM) works.** Its colour-bar test pattern is followed by the title screen. It continues on a mouse button or fire button; the keyboard is only enabled after its keyboard test.
-- **RP9 host folders** (`<harddrive root="shared"/>`) are skipped. They need a host filesystem handler.
 - **Not implemented:**
   - BPLCON2 undocumented priority codes 5-7.
   - The exact BLTBDAT hold semantics.

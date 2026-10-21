@@ -1,11 +1,11 @@
 # rp9 title file	status	note
 # status: ok = reaches title/menu in automated test, blank = no picture after 90s, unsupported = needs unemulated hardware
-Walker Prototype (Amiga Technologies, 1996, Amiga)	unsupported	hard disk title that needs 68020+/AGA (later milestone)
+Walker Prototype (Amiga Technologies, 1996, Amiga)	unsupported	its Walker-System/Walker-Work folders are not on the Amiga Forever 11 DVD
 Amiga 600 (Commodore-Amiga, 1992, Amiga)	ok	title screen reached (automated)
 Amiga 500 Plus (Commodore-Amiga, 1991, Amiga)	ok	title screen reached (automated)
 Amiga 500 (Commodore-Amiga, 1987, Amiga)	ok	title screen reached (automated)
 Amiga 4000 PPC (Commodore-Amiga & Phase 5, 1997, Amiga)	unsupported	needs a PowerPC accelerator
-Amiga 4000 Enhanced 3.X (Commodore-Amiga & Cloanto, 1997, Amiga)	unsupported	its main drive is an Amiga Forever host folder (not supported)
+Amiga 4000 Enhanced 3.X (Commodore-Amiga & Cloanto, 1997, Amiga)	ok	boots Workbench from the System/Work host folders (dismiss the uaegfx.card requester: no RTG card)
 Amiga 4000 (Commodore-Amiga, 1992, Amiga)	ok	boots Workbench 3.1
 Amiga 3000 (Commodore-Amiga, 1990, Amiga)	ok	boots Workbench 3.1 from the built-in SCSI
 Amiga 2000 Enhanced 1.3 (Commodore-Amiga & Cloanto, 1997, Amiga)	ok	hard disk (A590): boots Workbench; the "Shared" host folder is not supported
