@@ -52,8 +52,9 @@ none are included. Here are the legal ways to get them.
   disks and a collection of licensed games and demos as `.rp9` packages. The ROMs are encrypted;
   copy them together with their `rom.key` and RustyAmiga decrypts them as it loads them. Check
   Cloanto's edition comparison before buying, because the cheaper editions include fewer ROMs.
-- **Your own Amiga.** If you own the hardware, you can read the ROM out of it with a tool such as
-  TransROM (part of Amiga Forever's transfer tools) or with an EPROM reader. The legality of making
+- **Your own Amiga.** If you own the hardware, you can copy its ROM to a PC with Amiga Explorer
+  (included with Amiga Forever) over a cable. A ROM-dump tool such as TransROM, or an EPROM reader,
+  also works. The legality of making
   a personal copy varies by country.
 - **AmigaOS 3.1.4 / 3.2** from [Hyperion Entertainment](https://www.hyperion-entertainment.com/) are
   modern updates of the classic OS, sold for real Amigas through Amiga dealers. Check the package
