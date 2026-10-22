@@ -3,6 +3,8 @@ name = "amiga"
 version = "0.1.0"
 edition = "2021"
 description = "Commodore Amiga emulator"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/vwillcox/RustyAmiga"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }

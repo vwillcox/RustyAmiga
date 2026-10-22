@@ -66,3 +66,18 @@ amiga --list-boards
 
 RustyAmiga is a work in progress. Not yet emulated: the CD32 and CDTV CD drives, RTG graphics
 cards, MMU address translation, the 68060, and PowerPC boards.
+
+## Licence
+
+RustyAmiga is licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+at your option. Unless you explicitly state otherwise, any contribution you submit for inclusion in
+this project, as defined in the Apache-2.0 license, is dual licensed as above, without any additional
+terms or conditions.
+
+The licence covers RustyAmiga's own code only. Kickstart ROMs, AmigaOS and Amiga software are
+copyrighted by their owners and are not part of this project. Amiga is a trademark of its owners;
+RustyAmiga is not affiliated with them.
