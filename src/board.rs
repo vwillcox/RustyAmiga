@@ -78,6 +78,8 @@ pub struct Board {
     pub rom: Vec<u8>,
     /// Extension ROM at $E00000 (AROS, CD32, CDTV).
     pub ext_rom: Vec<u8>,
+    /// The CDTV's battery-backed RAM at $DC8000 (16 KB).
+    pub nvram: Vec<u8>,
     rom_mask: u32,
     pub overlay: bool,
 
@@ -161,6 +163,15 @@ pub struct Board {
     pub mouse_right: bool,
     /// Joystick in port 2: up, down, left, right, fire, fire2.
     pub joy: [bool; 6],
+    /// CD32 joypad's other buttons: play, reverse, forward, green, yellow
+    /// (red and blue are fire and fire2).
+    pub pad: [bool; 5],
+    /// The CD32 joypad is plugged into port 2.
+    pub cd32_pad: bool,
+    /// The pad's shift register: bits left to send (8 = reloaded).
+    pad_shift: u8,
+    /// Last level of the shift clock (CIA-A PA7 as an output).
+    pad_clock: bool,
     potgo: u16,
     /// POT0DAT/POT1DAT counters (Y<<8 | X), counting lines after POTGO START.
     pot: [u16; 2],
@@ -216,6 +227,7 @@ impl Board {
             rom,
             rom_mask,
             ext_rom: vec![],
+            nvram: if cfg.model == crate::config::Model::Cdtv { vec![0; 0x4000] } else { vec![] },
             overlay: true,
             cycles: 0,
             cck: 0,
@@ -279,6 +291,10 @@ impl Board {
             mouse_left: false,
             mouse_right: false,
             joy: [false; 6],
+            pad: [false; 5],
+            cd32_pad: cfg.model == crate::config::Model::Cd32,
+            pad_shift: 8,
+            pad_clock: false,
             potgo: 0,
             pot: [0; 2],
             pot_lines: 0,
@@ -913,6 +929,11 @@ impl Board {
         }
     }
 
+    /// The CD32 pad is in serial mode: port 2 pin 5 driven low.
+    fn pad_serial(&self) -> bool {
+        self.cd32_pad && self.potgo & 0x2000 != 0 && self.potgo & 0x1000 == 0
+    }
+
     fn cia_a_inputs(&self) -> u8 {
         let mut v = 0xffu8;
         if self.joy[4] {
@@ -998,6 +1019,12 @@ impl Board {
             self.cia_a.write(reg, v as u8);
             if reg == 0 || reg == 2 {
                 let pa = self.cia_a.pa_out();
+                // The CD32 pad shifts on each rising edge of PA7 driven as a clock.
+                let clock = self.cia_a.ddra & 0x80 != 0 && pa & 0x80 != 0;
+                if clock && !self.pad_clock && self.pad_serial() {
+                    self.pad_shift = self.pad_shift.saturating_sub(1);
+                }
+                self.pad_clock = clock;
                 if let Some(a) = self.akiko.as_mut() {
                     // The CD32 has no overlay bit: PA0 mutes CD audio (low =
                     // muted), and the boot ROM's first write clears the overlay.
@@ -1108,10 +1135,27 @@ impl Board {
             0x014 => self.pot[1],
             0x016 => {
                 let mut v = 0xff00u16;
+                // Pins POTGO drives as outputs read back what is driven.
+                for (out, dat) in [(0x8000, 0x4000), (0x2000, 0x1000), (0x0800, 0x0400), (0x0200, 0x0100)] {
+                    if self.potgo & out != 0 && self.potgo & dat == 0 {
+                        v &= !dat;
+                    }
+                }
                 if self.mouse_right {
                     v &= !0x0400;
                 }
-                if self.joy[5] {
+                if self.pad_serial() {
+                    // Pin 9 is the shift register's output: the buttons (low
+                    // when pressed) blue, red, yellow, green, forward, reverse,
+                    // play, then a 1 and a 0 that identify the pad.
+                    let b = [self.pad[0], self.pad[1], self.pad[2], self.pad[3], self.pad[4], self.joy[4], self.joy[5]];
+                    let high = match self.pad_shift {
+                        0 => false,
+                        1 => true,
+                        n => !b[(n - 2).min(6) as usize],
+                    };
+                    v = v & !0x4000 | if high { 0x4000 } else { 0 };
+                } else if self.joy[5] {
                     v &= !0x4000;
                 }
                 v
@@ -1167,6 +1211,10 @@ impl Board {
             }
             0x034 => {
                 self.potgo = v;
+                if !self.pad_serial() {
+                    // Pin 5 high or floating: the pad's register stays loaded.
+                    self.pad_shift = 8;
+                }
                 if v & 1 != 0 {
                     // START: discharge the pot capacitors and begin counting.
                     self.pot = [0; 2];
@@ -1408,6 +1456,7 @@ impl Board {
             let mut dev = std::mem::replace(&mut self.exp.cards[i].dev, Device::Busy);
             if let Device::Io(d) = &mut dev {
                 d.tick(now, &mut DmaPort(self));
+                d.take_cd_audio(&mut self.audio.cd);
             }
             self.exp.cards[i].dev = dev;
         }
@@ -1514,6 +1563,8 @@ enum Region {
     Akiko,
     /// The clock: one nibble per 4 bytes, in the low bits of the odd byte.
     Rtc,
+    /// The CDTV's battery-backed RAM: offset.
+    Nvram(usize),
     None,
 }
 
@@ -1536,6 +1587,7 @@ impl Board {
             0x20..=0x9f => self.card_region(self.exp.lookup24(a)),
             0xa0..=0xa3 if self.gayle.as_ref().is_some_and(|g| g.card_present()) => Region::Pcmcia,
             0xb8 if self.akiko.is_some() => Region::Akiko,
+            0xdc if a & 0x8000 != 0 && !self.nvram.is_empty() => Region::Nvram(a as usize & 0x3fff),
             0xdc if self.rtc.is_some() => Region::Rtc,
             0xa0..=0xbf => Region::Cia,
             0xc0..=0xd7 => {
@@ -1559,7 +1611,11 @@ impl Board {
             0xdd if self.scsi.as_ref().is_some_and(|s| s.a3000) => Region::Scsi(a & 0xffff),
             0xe9..=0xef if self.exp.lookup24(a).is_some() => self.card_region(self.exp.lookup24(a)),
             0xf8..=0xff => Region::Rom((a & self.rom_mask) as usize),
-            0xe0..=0xe7 if !self.ext_rom.is_empty() => Region::ExtRom((a as usize - 0xe0_0000) % self.ext_rom.len()),
+            // The CDTV's extended ROM sits at $F00000.
+            0xf0..=0xf7 if self.cfg.model == crate::config::Model::Cdtv && !self.ext_rom.is_empty() => {
+                Region::ExtRom((a as usize - 0xf0_0000) % self.ext_rom.len())
+            }
+            0xe0..=0xe7 if !self.ext_rom.is_empty() && self.cfg.model != crate::config::Model::Cdtv => Region::ExtRom((a as usize - 0xe0_0000) % self.ext_rom.len()),
             0xe0..=0xe7 if self.rom.len() > 0x80000 => Region::Rom((a & self.rom_mask) as usize),
             _ => {
                 if std::env::var_os("AMIGA_LOG_UNMAPPED").is_some() {
@@ -1586,6 +1642,11 @@ fn expansion_cards(cfg: &Config) -> Vec<Card> {
         specs.push(("z3ram", size(cfg.z3_kb)));
     }
     let mut cards: Vec<Card> = vec![];
+    if cfg.model == crate::config::Model::Cdtv {
+        // The CDTV's DMAC (CD controller) is first on the chain, at $E90000.
+        let ac = crate::expansion::Autoconfig { zorro3: false, memory: false, diag_rom: None, size: 0x10000, manufacturer: 514, product: 3, serial: 0 };
+        cards.push(Card { board: "cdtv-dmac", ac, base: None, state: crate::expansion::CardState::Waiting, dev: Device::Io(Box::new(crate::cdtv::CdtvDmac::new())) });
+    }
     for (id, opts) in specs {
         match registry::find(id).map(|b| b.build(&opts)) {
             Some(Ok(p)) => cards.extend(p.cards),
@@ -1687,6 +1748,10 @@ impl Bus for Board {
             Region::ExtRom(o) => {
                 self.cpu_cycles(4);
                 self.ext_rom[o]
+            }
+            Region::Nvram(o) => {
+                self.cpu_cycles(4);
+                self.nvram[o]
             }
             Region::Custom => {
                 self.chip_access();
@@ -1796,6 +1861,10 @@ impl Bus for Board {
                 self.cpu_cycles(4);
                 (self.ext_rom[o] as u16) << 8 | self.ext_rom[o + 1] as u16
             }
+            Region::Nvram(o) => {
+                self.cpu_cycles(4);
+                (self.nvram[o] as u16) << 8 | self.nvram[o + 1] as u16
+            }
             Region::Custom => {
                 self.chip_access();
                 self.custom_read((addr & 0x1fe) as u16)
@@ -1888,6 +1957,10 @@ impl Bus for Board {
                     self.rtc.as_mut().unwrap().write((addr as usize >> 2) & 15, v);
                 }
             }
+            Region::Nvram(o) => {
+                self.cpu_cycles(4);
+                self.nvram[o] = v;
+            }
             Region::Custom => {
                 self.chip_access();
                 // The 68000 puts the byte on both halves of the data bus.
@@ -1977,6 +2050,11 @@ impl Bus for Board {
             Region::Rtc => {
                 self.cpu_cycles(4);
                 self.rtc.as_mut().unwrap().write((addr as usize >> 2) & 15, v as u8);
+            }
+            Region::Nvram(o) => {
+                self.cpu_cycles(4);
+                self.nvram[o] = (v >> 8) as u8;
+                self.nvram[o + 1] = v as u8;
             }
             Region::Custom => {
                 self.chip_access();

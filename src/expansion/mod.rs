@@ -136,6 +136,12 @@ pub trait Controller: Send {
     fn has_rom(&self) -> bool {
         true
     }
+    /// Put a disc in the board's CD drive, if it has one (the CDTV's).
+    fn insert_disc(&mut self, _disc: crate::cdimage::Disc) -> bool {
+        false
+    }
+    /// Move CD audio (44.1 kHz stereo) produced so far into `out`.
+    fn take_cd_audio(&mut self, _out: &mut std::collections::VecDeque<(i16, i16)>) {}
 }
 
 /// What a card does once configured.

@@ -94,7 +94,8 @@ struct Args {
     #[arg(long = "type")]
     type_keys: Vec<String>,
     /// Headless: hold joystick buttons for 10 frames, e.g. "1200:fire" or
-    /// "900:right"; names are up, down, left, right, fire, fire2 (joined by +).
+    /// "900:right"; names are up, down, left, right, fire, fire2 and the CD32
+    /// pad's play, reverse, forward, green, yellow (joined by +).
     #[arg(long = "joy")]
     joy_presses: Vec<String>,
     /// Headless: record audio output to a 16-bit stereo WAV file.
@@ -534,7 +535,7 @@ fn main() {
         || amiga.board.exp.cards.iter().any(|c| matches!(c.dev, amiga::expansion::Device::A2091))
         || amiga.board.controllers().any(|d| d.disks().is_some());
     let atapi_cd = !has_scsi && amiga.board.gayle.is_some();
-    if !hdfs.is_empty() || (args.cd.is_some() && !has_scsi && !atapi_cd && amiga.board.akiko.is_none()) {
+    if !hdfs.is_empty() || (args.cd.is_some() && !has_scsi && !atapi_cd && amiga.board.akiko.is_none() && amiga.board.cfg.model != Model::Cdtv) {
         if hdfs.len() > 7 {
             die("at most 7 hard disks are supported");
         }
@@ -582,6 +583,18 @@ fn main() {
         log::info!("CD32 drive: {} ({} tracks, {} MB)", p.display(), disc.tracks.len(), disc.leadout as u64 * 2048 >> 20);
         akiko.cd.disc = Some(disc);
         akiko.cd.reset();
+    } else if let (Some(p), Model::Cdtv) = (&args.cd, amiga.board.cfg.model) {
+        // The CDTV's drive, behind the DMAC.
+        let disc = amiga::cdimage::Disc::open(p).unwrap_or_else(|e| die(e));
+        log::info!("CDTV drive: {} ({} tracks, {} MB)", p.display(), disc.tracks.len(), disc.leadout as u64 * 2048 >> 20);
+        let mut disc = Some(disc);
+        for c in amiga.board.controllers() {
+            if let Some(d) = disc.take() {
+                if !c.insert_disc(d) {
+                    die("no CDTV drive");
+                }
+            }
+        }
     } else if let Some(p) = &args.cd {
         let drive = amiga::scsi::HardDisk::cdrom(p).unwrap_or_else(|e| die(e));
         if atapi_cd {
@@ -611,8 +624,13 @@ fn main() {
         // AROS ships its kernel split across a main and an extension ROM, and
         // the CD32 has an extended ROM with its CD player and boot animation.
         let name = rom_path.file_name()?.to_str()?;
-        let ext = rom_path.with_file_name(name.replace(".rom", "-ext.rom"));
-        ((name.starts_with("aros") || name.contains("-cd32")) && ext.is_file()).then_some(ext)
+        let ext = if amiga.board.cfg.model == Model::Cdtv {
+            // The CDTV's extended ROM (CD filesystem, player, boot) at $F00000.
+            rom_path.with_file_name("amiga-os-130-cdtv-ext.rom")
+        } else {
+            rom_path.with_file_name(name.replace(".rom", "-ext.rom"))
+        };
+        ((name.starts_with("aros") || name.contains("-cd32") || amiga.board.cfg.model == Model::Cdtv) && ext.is_file()).then_some(ext)
     });
     if let Some(p) = ext {
         let data = std::fs::read(&p).unwrap_or_else(|e| die(format!("{}: {e}", p.display())));
@@ -669,14 +687,15 @@ fn main() {
                 (f.parse().unwrap_or_else(|_| die("bad frame in --type")), amiga::keyboard::text_to_keys(text))
             })
             .collect();
-        let joy_presses: Vec<(u64, [bool; 6])> = args
+        const BUTTONS: [&str; 11] = ["up", "down", "left", "right", "fire", "fire2", "play", "reverse", "forward", "green", "yellow"];
+        let joy_presses: Vec<(u64, [bool; 11])> = args
             .joy_presses
             .iter()
             .map(|t| {
                 let (f, names) = t.split_once(':').unwrap_or_else(|| die("--joy expects FRAME:BUTTONS"));
-                let mut b = [false; 6];
+                let mut b = [false; 11];
                 for n in names.split('+') {
-                    let i = ["up", "down", "left", "right", "fire", "fire2"].iter().position(|&x| x == n);
+                    let i = BUTTONS.iter().position(|&x| x == n);
                     b[i.unwrap_or_else(|| die(format!("unknown joystick button '{n}'")))] = true;
                 }
                 (f.parse().unwrap_or_else(|_| die("bad frame in --joy")), b)
@@ -710,7 +729,9 @@ fn main() {
                 }
                 !keys.is_empty()
             });
-            amiga.board.joy = joy_presses.iter().find(|(at, _)| (*at..*at + 10).contains(&f)).map_or([false; 6], |p| p.1);
+            let held = joy_presses.iter().find(|(at, _)| (*at..*at + 10).contains(&f)).map_or([false; 11], |p| p.1);
+            amiga.board.joy.copy_from_slice(&held[..6]);
+            amiga.board.pad.copy_from_slice(&held[6..]);
             if let (Some(n), Some(p)) = (args.shot_every, &args.screenshot) {
                 if f % n == 0 {
                     let stem = p.with_extension("");

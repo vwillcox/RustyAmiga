@@ -84,7 +84,8 @@ const HELP: &str = "\
 Host keys:
   click window  capture mouse        F12        release mouse
   F11           toggle fullscreen    End        toggle warp speed
-  Home          joystick on cursor keys (Right Ctrl = fire)
+  Home          joystick on cursor keys (Right Ctrl = fire, Right Alt = fire 2;
+                CD32 pad: P play, [ ] reverse/forward, G green, Y yellow)
   PageDown      next disk in swap list into DF0
   PageUp        hard reset           Insert     Amiga HELP key
   Pause         drive noises on/off
@@ -306,15 +307,22 @@ impl App {
         if !self.joy_keys {
             return false;
         }
-        let idx = match k {
-            KeyCode::ArrowUp => 0,
-            KeyCode::ArrowDown => 1,
-            KeyCode::ArrowLeft => 2,
-            KeyCode::ArrowRight => 3,
-            KeyCode::ControlRight => 4,
+        let b = &mut self.amiga.board;
+        let button = match k {
+            KeyCode::ArrowUp => &mut b.joy[0],
+            KeyCode::ArrowDown => &mut b.joy[1],
+            KeyCode::ArrowLeft => &mut b.joy[2],
+            KeyCode::ArrowRight => &mut b.joy[3],
+            KeyCode::ControlRight => &mut b.joy[4],
+            KeyCode::AltRight => &mut b.joy[5],
+            KeyCode::KeyP => &mut b.pad[0],
+            KeyCode::BracketLeft => &mut b.pad[1],
+            KeyCode::BracketRight => &mut b.pad[2],
+            KeyCode::KeyG => &mut b.pad[3],
+            KeyCode::KeyY => &mut b.pad[4],
             _ => return false,
         };
-        self.amiga.board.joy[idx] = down;
+        *button = down;
         true
     }
 
@@ -322,7 +330,8 @@ impl App {
         use gilrs::{Axis, Button, EventType};
         let Some(g) = self.gilrs.as_mut() else { return };
         while let Some(ev) = g.next_event() {
-            let joy = &mut self.amiga.board.joy;
+            let board = &mut self.amiga.board;
+            let (joy, pad) = (&mut board.joy, &mut board.pad);
             match ev.event {
                 EventType::ButtonPressed(b, _) | EventType::ButtonReleased(b, _) => {
                     let down = matches!(ev.event, EventType::ButtonPressed(..));
@@ -331,8 +340,15 @@ impl App {
                         Button::DPadDown => joy[1] = down,
                         Button::DPadLeft => joy[2] = down,
                         Button::DPadRight => joy[3] = down,
-                        Button::South | Button::RightTrigger => joy[4] = down,
+                        // Laid out like the CD32 pad: red, blue, green, yellow,
+                        // shoulders reverse/forward, Start play.
+                        Button::South | Button::RightTrigger2 => joy[4] = down,
                         Button::East => joy[5] = down,
+                        Button::West => pad[3] = down,
+                        Button::North => pad[4] = down,
+                        Button::LeftTrigger => pad[1] = down,
+                        Button::RightTrigger => pad[2] = down,
+                        Button::Start => pad[0] = down,
                         _ => {}
                     }
                 }
@@ -507,6 +523,7 @@ impl ApplicationHandler for App {
                         KeyCode::Home => {
                             self.joy_keys = !self.joy_keys;
                             self.amiga.board.joy = [false; 6];
+                            self.amiga.board.pad = [false; 5];
                             self.update_title();
                             return;
                         }

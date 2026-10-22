@@ -12,6 +12,8 @@ pub enum Model {
     #[value(name = "a4000t")]
     A4000T,
     Cd32,
+    /// The CDTV: an A500 (1 MB chip RAM, Kickstart 1.3) with a CD drive.
+    Cdtv,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,7 +26,7 @@ pub enum Chipset {
 impl Model {
     pub fn chipset(self) -> Chipset {
         match self {
-            Model::A500 | Model::A1000 | Model::A2000 => Chipset::Ocs,
+            Model::A500 | Model::A1000 | Model::A2000 | Model::Cdtv => Chipset::Ocs,
             Model::A500Plus | Model::A600 | Model::A3000 => Chipset::Ecs,
             Model::A1200 | Model::A4000 | Model::A4000T | Model::Cd32 => Chipset::Aga,
         }
@@ -34,14 +36,14 @@ impl Model {
     pub fn audio_lowpass_hz(self) -> f64 {
         match self {
             // 360 ohm / 0.1 uF
-            Model::A500 | Model::A500Plus | Model::A600 | Model::A2000 | Model::A1000 | Model::A3000 => 4420.97,
+            Model::A500 | Model::A500Plus | Model::A600 | Model::A2000 | Model::A1000 | Model::A3000 | Model::Cdtv => 4420.97,
             // 1.39 kohm / 3.3 nF
             _ => 34419.0,
         }
     }
 
     pub fn supported(self) -> bool {
-        matches!(self, Model::A500 | Model::A1000 | Model::A2000 | Model::A500Plus | Model::A600 | Model::A1200 | Model::A3000 | Model::A4000 | Model::A4000T | Model::Cd32)
+        matches!(self, Model::A500 | Model::A1000 | Model::A2000 | Model::A500Plus | Model::A600 | Model::A1200 | Model::A3000 | Model::A4000 | Model::A4000T | Model::Cd32 | Model::Cdtv)
     }
 
     /// Machines with a 32-bit address bus (A3000/A4000).
@@ -96,7 +98,7 @@ impl Config {
         let (chip_kb, slow_kb) = match model {
             Model::A500 | Model::A2000 => (512, 512),
             Model::A1000 => (256, 0),
-            Model::A500Plus | Model::A600 | Model::A3000 => (1024, 0),
+            Model::A500Plus | Model::A600 | Model::A3000 | Model::Cdtv => (1024, 0),
             _ => (2048, 0),
         };
         Config {
@@ -110,7 +112,7 @@ impl Config {
             // The A2000 and A500+ have a clock on the motherboard; the A3000 and
             // A4000 a Ricoh one. Others need a trapdoor board.
             rtc: match model {
-                Model::A2000 | Model::A500Plus => Some(crate::rtc::RtcKind::Msm6242),
+                Model::A2000 | Model::A500Plus | Model::Cdtv => Some(crate::rtc::RtcKind::Msm6242),
                 Model::A3000 | Model::A4000 | Model::A4000T => Some(crate::rtc::RtcKind::Rf5c01),
                 _ => None,
             },

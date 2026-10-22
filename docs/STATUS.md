@@ -6,8 +6,8 @@
 - `tools/install-desktop.sh` adds it to the desktop's application menu (Omarchy, GNOME, KDE...) with an icon; the entry starts in the checkout so the ROM and media folders are found.
 - `./target/release/amiga game.rp9` or `./target/release/amiga disk.adf` runs a title directly.
 - `--hdf image.hdf` (repeatable) attaches hard disks, SCSI IDs 0 up: to a disk controller chosen with `--board` (such as `a4091`), else the model's own (A3000 and A4000T SCSI, A600/A1200/A4000 IDE), else an A590/A2091 that is added for them.
-- `--cd image.iso` (or a `.cue` sheet with its BIN files) puts the disc in the CD32's drive. On other models it puts a SCSI CD-ROM drive at the next free SCSI ID on the same controller; a machine without SCSI gets an ATAPI drive on its IDE port (A600/A1200/A4000), or else an A590/A2091.
-- `--joy FRAME:BUTTONS` (headless) holds joystick buttons for 10 frames, e.g. `1100:fire` or `900:left+fire`.
+- `--cd image.iso` (or a `.cue` sheet with its BIN files) puts the disc in the CD32's or CDTV's drive. On other models it puts a SCSI CD-ROM drive at the next free SCSI ID on the same controller; a machine without SCSI gets an ATAPI drive on its IDE port (A600/A1200/A4000), or else an A590/A2091.
+- `--joy FRAME:BUTTONS` (headless) holds joystick buttons for 10 frames, e.g. `1100:fire` or `900:left+fire`; the CD32 pad's are play, reverse, forward, green and yellow.
   RP9 hard disk titles also need the shared Amiga Forever boot disks (`workbench-135.hdf` etc. from
   `Amiga Files/Shared/hdf` on the AF DVD) in `./hdf`.
   Packages built on host folders (AROS, Amiga 4000 Enhanced 3.X) need `Amiga Files/Shared/dir` in `./dir`.
@@ -89,7 +89,20 @@ The CD32 model has Akiko at `$B80000` (`src/akiko.rs`): the chip ID, the chunky-
 The CD drive (`src/akiko_cd.rs`, after WinUAE's akiko.cpp) talks to the ROM over Akiko's DMA rings. It supports the status/firmware, TOC, data read (raw sectors into the PBX slots), CD audio play/pause/stop, Q subchannel and LED commands. Discs are ISO files or CUE/BIN sheets with audio tracks (`src/cdimage.rs`). CD audio is mixed with Paula's output. CIA-A PA0 mutes it, because the CD32 has no ROM overlay bit; treating PA0 as the overlay made the CD player crash when it unmuted.
 - Amiga CD32 Gamer Vol. 12 (archive.org, CUE/BIN) boots to its menu.
 - Its audio tracks, in a cue sheet without the data track, play in the ROM's CD player, which shows the track and the running time.
-- Not yet emulated: the CD32 joypad's extra buttons, CD+G and audio scanning.
+- The CD32 joypad is in port 2: in serial mode (POTGO drives pin 5 low), each rising edge on CIA-A PA7 shifts out the next button on pin 9 (blue, red, yellow, green, forward, reverse, play, then 1, 0). Gamepads map like the pad (A red, B blue, X green, Y yellow, shoulders reverse/forward, Start play). With the joystick keys on (Home), P is play, [ and ] reverse/forward, G green, Y yellow, and Right Alt blue. The CD player's Play and Forward buttons work.
+- POTINP reads back the pins that POTGO drives as outputs.
+- Not yet emulated: CD+G and audio scanning.
+
+### CDTV
+`--model cdtv` (RP9 system `a-cdtv`) is an A500 with 1 MB of chip RAM, Kickstart 1.3, the CDTV extended ROM at $F00000 (`amiga-os-130-cdtv-ext.rom`, loaded automatically), a clock and 16 KB of battery-backed RAM at $DC8000.
+
+The CD controller (`src/cdtv.rs`, after WinUAE's cdtv.cpp) is the DMAC on the autoconfig chain at $E90000. It includes the 6525 TriPort, whose port C carries the drive's handshake lines as INT2 interrupts, and the Matshita drive's command set: status, model, mode set, read with DMAC word DMA, TOC, Q subchannel, and CD audio play/pause with the DAC volume.
+- Without a disc it shows the CDTV animation.
+- CDPD Vol. 1 (CUE/BIN) boots from the CD to its "CDTV Workbench disk" CLI.
+- Open items:
+  - The disc's startup prints "Battery Backed up Clock not found".
+  - CD+G subchannel bytes (SBCP), the front panel, the IR remote and the memory card are not emulated.
+  - The NVRAM is not saved between runs.
 
 ### 68000 bus timing (Voyage)
 Voyage (Razor 1911) now runs. Its protection needed three timing details:
@@ -129,7 +142,7 @@ On an IDE port the CD-ROM drive is an ATAPI device (`src/gayle.rs`). It answers 
 
 ### Remaining open items
 - **Incision works but precalculates for a long time.** It renders its soundtrack first; at 64x the intro starts by frame 9000.
-- **Not emulated:** the CDTV, PowerPC boards, UAE's RTG card (uaegfx), and the user's own shared folder (`<harddrive root="shared"/>`, which is skipped). The Walker prototype's folders are not on the AF 11 DVD.
+- **Not emulated:** PowerPC boards, UAE's RTG card (uaegfx), and the user's own shared folder (`<harddrive root="shared"/>`, which is skipped). The Walker prototype's folders are not on the AF 11 DVD.
 - **Not Amiga software:** the Videos and Gallery packages (DVD video and host images for Amiga Forever's player). The emulator now refuses them with that explanation.
 
 ## Known issues and open items
@@ -148,4 +161,4 @@ On an IDE port the CD-ROM drive is an ATAPI device (`src/gayle.rs`). It answers 
 ## Next milestones
 
 1. A3000 polish (the SDMAC works; nothing beyond booting is tested).
-2. The CD32 joypad, then the CDTV (its CD drive and controller).
+2. CDTV: the clock check, the front panel and IR remote, CD audio tests; NVRAM saving.

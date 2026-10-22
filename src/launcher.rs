@@ -161,7 +161,8 @@ const MODELS: &[(Model, &str)] = &[
     (Model::A3000, "Amiga 3000"),
     (Model::A4000, "Amiga 4000"),
     (Model::A4000T, "Amiga 4000T"),
-    (Model::Cd32, "CD32 (no CD drive yet)"),
+    (Model::Cd32, "CD32"),
+    (Model::Cdtv, "CDTV"),
 ];
 
 fn model_name(m: Model) -> &'static str {
@@ -859,7 +860,7 @@ impl eframe::App for App {
                         self.save_settings();
                     }
                 }
-                ui.label(egui::RichText::new("In the emulator: click to capture mouse, F12 release, F11 fullscreen, End warp, Home joystick keys, PageDown next disk").weak());
+                ui.label(egui::RichText::new("In the emulator: click to capture mouse, F12 release, F11 fullscreen, End warp, Home joystick keys (CD32 pad: P [ ] G Y), PageDown next disk").weak());
             });
         });
         egui::CentralPanel::default().show(ctx, |ui| match self.tab {

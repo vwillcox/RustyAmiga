@@ -64,6 +64,7 @@ impl Rp9 {
             // The Walker prototype is an AGA 68030 machine with its own Kickstart.
             "a-4000" | "a-4xxx" | "a-aros" | "a-walker" => Model::A4000,
             "cd32" | "a-cd32" => Model::Cd32,
+            "cdtv" | "a-cdtv" => Model::Cdtv,
             _ => return None,
         })
     }
@@ -284,7 +285,7 @@ impl Rp9 {
         match self.model() {
             None => return Some(format!("unknown system {}", self.system)),
             // Without a disc the CD32 shows its own start-up animation.
-            Some(Model::Cd32) => return None,
+            Some(Model::Cd32 | Model::Cdtv) => return None,
             Some(m) if !m.supported() => return Some(format!("{m:?} is not emulated yet")),
             _ => {}
         }
