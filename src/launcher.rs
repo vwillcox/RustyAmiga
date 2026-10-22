@@ -25,6 +25,15 @@ pub struct Machine {
     pub stereo_separation: f32,
     pub floppies: [Option<PathBuf>; 4],
     pub write_protect: bool,
+    /// Add-on boards: (registry id, options such as "ram=4M").
+    #[serde(default)]
+    pub boards: Vec<(String, String)>,
+    /// Hard disk images (HDF), in unit order.
+    #[serde(default)]
+    pub hard_disks: Vec<PathBuf>,
+    /// CD-ROM image (ISO 9660) in a SCSI CD-ROM drive.
+    #[serde(default)]
+    pub cd: Option<PathBuf>,
 }
 
 impl Default for Machine {
@@ -41,6 +50,9 @@ impl Default for Machine {
             stereo_separation: 1.0,
             floppies: Default::default(),
             write_protect: false,
+            boards: vec![],
+            hard_disks: vec![],
+            cd: None,
         }
     }
 }
@@ -148,6 +160,7 @@ const MODELS: &[(Model, &str)] = &[
     (Model::A1200, "Amiga 1200"),
     (Model::A3000, "Amiga 3000"),
     (Model::A4000, "Amiga 4000"),
+    (Model::A4000T, "Amiga 4000T"),
     (Model::Cd32, "CD32 (no CD drive yet)"),
 ];
 
@@ -413,6 +426,9 @@ impl App {
             stereo_separation: self.machine.stereo_separation,
             floppies: Default::default(),
             write_protect: false,
+            boards: vec![],
+            hard_disks: vec![],
+            cd: None,
         }
     }
 
@@ -428,6 +444,9 @@ impl App {
         }
         cmd.args(["--chip", &m.chip_kb.to_string(), "--slow", &m.slow_kb.to_string(), "--fast", &m.fast_kb.to_string()]);
         cmd.args(["--drives", &m.drives.to_string(), "--stereo-separation", &m.stereo_separation.to_string()]);
+        for (id, opts) in &m.boards {
+            cmd.arg("--board").arg(if opts.is_empty() { id.clone() } else { format!("{id}:{opts}") });
+        }
         if m.ntsc {
             cmd.arg("--ntsc");
         }
@@ -441,6 +460,12 @@ impl App {
             if let Some(f) = f {
                 cmd.arg(format!("--df{i}")).arg(f);
             }
+        }
+        for h in &m.hard_disks {
+            cmd.arg("--hdf").arg(h);
+        }
+        if let Some(c) = &m.cd {
+            cmd.arg("--cd").arg(c);
         }
         cmd.stderr(std::process::Stdio::piped()).stdout(std::process::Stdio::piped());
         let desc = format!("{cmd:?}");
@@ -560,6 +585,42 @@ impl App {
         });
     }
 
+    /// Add-on boards: the ones fitted, and the ones that fit this model.
+    fn expansion_editor(ui: &mut egui::Ui, m: &mut Machine) {
+        use amiga::expansion::registry::{self, Options, BOARDS};
+        let mut remove = None;
+        egui::Grid::new("boards").num_columns(4).spacing([10.0, 4.0]).show(ui, |ui| {
+            for (i, (id, opts)) in m.boards.iter_mut().enumerate() {
+                let Some(info) = registry::find(id) else { continue };
+                ui.label(info.name).on_hover_text(format!("{}, {}; {}", info.maker, info.year, info.slot.describe()));
+                ui.add(egui::TextEdit::singleline(opts).desired_width(140.0).hint_text("options")).on_hover_text(info.options);
+                let problem = if !info.slot.fits(m.model) {
+                    Some(format!("does not fit the {}", model_name(m.model)))
+                } else {
+                    Options::parse(opts).and_then(|o| info.build(&o)).err()
+                };
+                match problem {
+                    Some(e) => ui.colored_label(egui::Color32::LIGHT_RED, e),
+                    None => ui.label(""),
+                };
+                if ui.small_button("Remove").clicked() {
+                    remove = Some(i);
+                }
+                ui.end_row();
+            }
+        });
+        if let Some(i) = remove {
+            m.boards.remove(i);
+        }
+        egui::ComboBox::from_id_salt("add-board").width(320.0).selected_text("Add board…").show_ui(ui, |ui| {
+            for b in BOARDS.iter().filter(|b| b.slot.fits(m.model)) {
+                if ui.selectable_label(false, format!("{} ({})", b.name, b.maker)).on_hover_text(b.options).clicked() {
+                    m.boards.push((b.id.to_string(), String::new()));
+                }
+            }
+        });
+    }
+
     fn floppy_editor(ui: &mut egui::Ui, m: &mut Machine) {
         for i in 0..m.drives {
             ui.horizontal(|ui| {
@@ -576,6 +637,42 @@ impl App {
                 }
             });
         }
+    }
+
+    fn storage_editor(ui: &mut egui::Ui, m: &mut Machine) {
+        let mut remove = None;
+        for (i, h) in m.hard_disks.iter().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(format!("Unit {i}:"));
+                let text = h.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
+                ui.add_sized([360.0, 20.0], egui::Label::new(text).truncate());
+                if ui.button("Remove").clicked() {
+                    remove = Some(i);
+                }
+            });
+        }
+        if let Some(i) = remove {
+            m.hard_disks.remove(i);
+        }
+        if m.hard_disks.len() < 7 && ui.button("Add hard disk…").clicked() {
+            if let Some(p) = rfd::FileDialog::new().add_filter("Hard disk image", &["hdf"]).pick_file() {
+                m.hard_disks.push(p);
+            }
+        }
+        ui.horizontal(|ui| {
+            ui.label("CD-ROM:");
+            let text = m.cd.as_ref().and_then(|p| p.file_name()).map(|f| f.to_string_lossy().to_string()).unwrap_or("(empty)".into());
+            ui.add_sized([360.0, 20.0], egui::Label::new(text).truncate());
+            if ui.button("Insert…").clicked() {
+                if let Some(p) = rfd::FileDialog::new().add_filter("CD image", &["iso"]).pick_file() {
+                    m.cd = Some(p);
+                }
+            }
+            if m.cd.is_some() && ui.button("Eject").clicked() {
+                m.cd = None;
+            }
+        });
+        ui.label(egui::RichText::new("Hard disks go on the SCSI board chosen above, else the machine's own controller; the CD-ROM drive is SCSI.").weak());
     }
 
     fn machine_tab(&mut self, ui: &mut egui::Ui) {
@@ -602,8 +699,14 @@ impl App {
         ui.heading("Configuration");
         Self::machine_editor(ui, &mut self.machine, &self.roms, "main");
         ui.separator();
+        ui.heading("Expansion boards");
+        Self::expansion_editor(ui, &mut self.machine);
+        ui.separator();
         ui.heading("Floppy disks");
         Self::floppy_editor(ui, &mut self.machine);
+        ui.separator();
+        ui.heading("Hard disks and CD-ROM");
+        Self::storage_editor(ui, &mut self.machine);
         ui.add_space(10.0);
         let ok = self.machine.rom.is_some();
         if ui.add_enabled(ok, egui::Button::new(egui::RichText::new("▶  Start Amiga").size(18.0))).clicked() {

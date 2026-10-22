@@ -8,6 +8,9 @@ pub enum Model {
     A1200,
     A3000,
     A4000,
+    /// The tower A4000: an A4000 with a built-in NCR 53C710 SCSI controller.
+    #[value(name = "a4000t")]
+    A4000T,
     Cd32,
 }
 
@@ -23,7 +26,7 @@ impl Model {
         match self {
             Model::A500 | Model::A1000 | Model::A2000 => Chipset::Ocs,
             Model::A500Plus | Model::A600 | Model::A3000 => Chipset::Ecs,
-            Model::A1200 | Model::A4000 | Model::Cd32 => Chipset::Aga,
+            Model::A1200 | Model::A4000 | Model::A4000T | Model::Cd32 => Chipset::Aga,
         }
     }
 
@@ -38,22 +41,29 @@ impl Model {
     }
 
     pub fn supported(self) -> bool {
-        matches!(self, Model::A500 | Model::A1000 | Model::A2000 | Model::A500Plus | Model::A600 | Model::A1200 | Model::A3000 | Model::A4000 | Model::Cd32)
+        matches!(self, Model::A500 | Model::A1000 | Model::A2000 | Model::A500Plus | Model::A600 | Model::A1200 | Model::A3000 | Model::A4000 | Model::A4000T | Model::Cd32)
     }
 
     /// Machines with a 32-bit address bus (A3000/A4000).
     pub fn addr32(self) -> bool {
-        matches!(self, Model::A3000 | Model::A4000)
+        matches!(self, Model::A3000 | Model::A4000 | Model::A4000T)
     }
 
     pub fn cpu(self) -> crate::cpu::CpuModel {
         match self {
             Model::A1200 | Model::Cd32 => crate::cpu::CpuModel::M68020,
             Model::A3000 => crate::cpu::CpuModel::M68030,
-            Model::A4000 => crate::cpu::CpuModel::M68040,
+            Model::A4000 | Model::A4000T => crate::cpu::CpuModel::M68040,
             _ => crate::cpu::CpuModel::M68000,
         }
     }
+}
+
+/// A board from the registry with its options.
+#[derive(Clone, Debug)]
+pub struct BoardSpec {
+    pub id: String,
+    pub opts: crate::expansion::registry::Options,
 }
 
 #[derive(Clone, Debug)]
@@ -66,6 +76,10 @@ pub struct Config {
     pub mb_kb: u32,
     /// Zorro III fast RAM (A3000/A4000).
     pub z3_kb: u32,
+    /// Add-on boards (`--board`), in slot order.
+    pub boards: Vec<BoardSpec>,
+    /// Battery-backed clock at $DC0000.
+    pub rtc: Option<crate::rtc::RtcKind>,
     pub cpu: crate::cpu::CpuModel,
     pub fpu: crate::cpu::FpuModel,
     /// CPU speed as a multiple of a 7 MHz 68000 (for non-chip-bus work).
@@ -92,15 +106,23 @@ impl Config {
             fast_kb: 0,
             mb_kb: if model.addr32() { 4096 } else { 0 },
             z3_kb: 0,
+            boards: vec![],
+            // The A2000 and A500+ have a clock on the motherboard; the A3000 and
+            // A4000 a Ricoh one. Others need a trapdoor board.
+            rtc: match model {
+                Model::A2000 | Model::A500Plus => Some(crate::rtc::RtcKind::Msm6242),
+                Model::A3000 | Model::A4000 | Model::A4000T => Some(crate::rtc::RtcKind::Rf5c01),
+                _ => None,
+            },
             cpu: model.cpu(),
             fpu: match model {
                 Model::A3000 => crate::cpu::FpuModel::M68882,
-                Model::A4000 => crate::cpu::FpuModel::M68040,
+                Model::A4000 | Model::A4000T => crate::cpu::FpuModel::M68040,
                 _ => crate::cpu::FpuModel::None,
             },
             cpu_speed: match model {
                 Model::A1200 | Model::Cd32 => 2.0,
-                Model::A3000 | Model::A4000 => 4.0,
+                Model::A3000 | Model::A4000 | Model::A4000T => 4.0,
                 _ => 1.0,
             },
             cpu_speed_adaptive: false,

@@ -3,8 +3,10 @@
 ## Running
 
 - `./target/release/amiga` with no arguments opens the graphical launcher.
+- `tools/install-desktop.sh` adds it to the desktop's application menu (Omarchy, GNOME, KDE...) with an icon; the entry starts in the checkout so the ROM and media folders are found.
 - `./target/release/amiga game.rp9` or `./target/release/amiga disk.adf` runs a title directly.
-- `--hdf image.hdf` (repeatable) attaches hard disks to an A590/A2091 SCSI controller, SCSI IDs 0 up.
+- `--hdf image.hdf` (repeatable) attaches hard disks, SCSI IDs 0 up: to a disk controller chosen with `--board` (such as `a4091`), else the model's own (A3000 and A4000T SCSI, A600/A1200/A4000 IDE), else an A590/A2091 that is added for them.
+- `--cd image.iso` puts a SCSI CD-ROM drive with that disc at the next free SCSI ID on the same controller (an A590/A2091 is added if the machine has no SCSI).
   RP9 hard disk titles also need the shared Amiga Forever boot disks (`workbench-135.hdf` etc. from
   `Amiga Files/Shared/hdf` on the AF DVD) in `./hdf`.
   Packages built on host folders (AROS, Amiga 4000 Enhanced 3.X) need `Amiga Files/Shared/dir` in `./dir`.
@@ -92,6 +94,24 @@ Voyage (Razor 1911) now runs. Its protection needed three timing details:
 ### 68000 address errors
 A word or long access at an odd address, or a jump to one, raises a group 0 exception with the 14-byte frame (status word, access address, IR, SR, PC). The instruction stops at the faulting access. Where its address registers, flags and stacked PC end up follows the SingleStepTests data. The misses (1.5%) are in MOVE's partial flag updates and a few stacked PCs. The emulator used to carry on silently, so crashing programs now Guru with 80000003 as on real hardware. The RP9 batch is unchanged.
 
+### Cycle-exact 68000
+The 68000 core matches the SingleStepTests suite's cycle count for every one of its 261894 cases (the harness now checks them): exception timing, branch prefetch behaviour, CCR/SR immediates, LEA/PEA indexed modes, bit operations, CHK, STOP, and DIVU/DIVS with the operand-dependent timings of the microcode. Write-only and unused custom registers now read back the last chip bus value (Dr. Mario relies on it).
+
+### Drive noises
+Floppy motor whirr, head steps (loading chugs; an empty drive clicks) and hard disk seeks, synthesized in `src/drivesound.rs` and mixed after Paula. Pause toggles them; `--no-drive-sounds` turns them off.
+
+### Expansion boards and clocks
+Boards sit on one autoconfig chain (`src/expansion/`): Zorro II boards answer at `$E80000`, Zorro III boards at `$FF000000`, in slot order. `--board ID[:options]` adds a board from the registry (`--list-boards`), and the launcher has an Expansion boards section. The generic fast RAM options (`--fast`, `--z3`, RP9 RAM) and the A590/A2091 use the same chain. The plan for the rest of the boards is in `docs/ADDONS.md`.
+- RAM boards with their real IDs: A2052, A2058, A560, Supra 500RX/2000, MicroBotics 8-Up, GVP Impact Series II, Oktagon 2008, MBX 1200z; the A2091 can carry its own RAM (`a2091:ram=2M`).
+- Battery-backed clocks at `$DC0000`: OKI MSM6242B on the A2000 and A500+ and on the A501, A601 and MBX 1200z trapdoor boards; Ricoh RF5C01A on the A3000/A4000. They run from the host's local time; setting the date from AmigaOS holds for the session.
+
+### NCR 53C710: A4091 and A4000T
+The 53C710 runs SCRIPTS, its own programs fetched from memory by DMA (`src/ncr710.rs`): block moves (direct, indirect, table indirect), SELECT (also table indirect), WAIT DISCONNECT/RESELECT, SET/CLEAR ATN and ACK, jumps, calls, returns and INT on phase and data conditions with relative addressing, register arithmetic, and memory moves, including those that target the chip's own registers. The targets' side of the bus (`src/scsi.rs`) handles messages: IDENTIFY, synchronous and wide negotiation (answered as asynchronous, 8-bit), MESSAGE REJECT and ABORT. ATN and the ACK held after MESSAGE IN are modelled. Missing targets time out after 1 ms.
+- `--board a4091` (A3000/A4000): Commodore's Zorro III controller with its own boot ROM (`amiga-boot-a4091.rom`): the nibble-wide ROM, the chip at `$800000` (and its `$840000` alias) and the DIP switches at `$8C0003`. Workbench 3.1 boots from it.
+- `--model a4000t`: the tower A4000, with the chip on the motherboard at `$DD0040` (mirrored at `$DD00C0`) driven by the A4000T Kickstart's scsi.device. Its IDE port is the A4000's. Workbench 3.1 boots from its SCSI disk.
+- SCSI CD-ROM drive (`--cd`): an ISO 9660 image read from the file as needed, with 2048-byte blocks, INQUIRY type 5 (removable), READ(6/10/12), READ CAPACITY, READ TOC (LBA and MSF), READ SUB-CHANNEL and MODE SENSE (write-protected). With the Amiga Forever System folder's CacheCDFS mounted on scsi.device unit 1, the Amiga Forever DVD image mounts as a 1614 MB volume on the A4091 and on the A3000's SCSI.
+- I/O boards share one interface (`Controller` in `src/expansion/`): registers, boot ROM, DMA, interrupt, reset and disks. The next storage chips (53C9x, 5380) will plug in the same way.
+
 ### Remaining open items
 - **Incision works but precalculates for a long time.** It renders its soundtrack first; at 64x the intro starts by frame 9000.
 - **Not emulated:** the CD32's CD-ROM drive, the CDTV, PowerPC boards, UAE's RTG card (uaegfx), and the user's own shared folder (`<harddrive root="shared"/>`, which is skipped). The Walker prototype's folders are not on the AF 11 DVD.
@@ -106,7 +126,7 @@ A word or long access at an odd address, or a jump to one, raises a group 0 exce
 - **Not implemented:**
   - BPLCON2 undocumented priority codes 5-7.
   - The exact BLTBDAT hold semantics.
-  - Cycle-exact blitter and CPU timing. Blits are immediate, with timed completion.
+  - Cycle-exact blitter. Blits are immediate, with timed completion. (The 68000 is cycle-exact; the 68020+ are not.)
   - Bus error exceptions (address errors are emulated).
   - 68030/68040 MMU address translation, and the 68060.
 

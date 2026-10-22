@@ -9,6 +9,7 @@ use crate::chipset::denise::{Denise, FB_H, FB_W};
 use crate::chipset::{dma, int};
 use crate::cia::{Cia, ICR_FLAG};
 use crate::config::{Chipset, Config};
+use crate::expansion::{registry, Card, Device, Expansion};
 use crate::floppy::Drive;
 use crate::keyboard::Keyboard;
 
@@ -59,22 +60,21 @@ pub struct Board {
     pub chip: Vec<u8>,
     pub chip_mask: u32,
     pub slow: Vec<u8>,
-    pub fast: Vec<u8>,
-    fast_base: Option<u32>,
     /// A3000/A4000 motherboard fast RAM, ending at $08000000.
     pub mb_ram: Vec<u8>,
-    /// Zorro III RAM board and its configured base.
-    pub z3_ram: Vec<u8>,
-    z3_base: Option<u32>,
-    z3_ac_done: bool,
-    autoconfig_done: bool,
-    /// A590/A2091 SCSI controller, if fitted (configured after the fast RAM).
+    /// Expansion boards on the autoconfig chain.
+    pub exp: Expansion,
+    /// A590/A2091 SCSI controller (on the chain), or the A3000's built-in SDMAC.
     pub scsi: Option<A2091>,
+    /// A motherboard controller with registers at a fixed address (the
+    /// A4000T's SCSI at $DD0040).
+    pub builtin: Option<Box<dyn crate::expansion::Controller>>,
     /// Gayle gate array with IDE (A600/A1200).
     pub gayle: Option<crate::gayle::Gayle>,
     /// CD32 only.
     pub akiko: Option<crate::akiko::Akiko>,
-    scsi_ac_done: bool,
+    /// Battery-backed clock at $DC0000.
+    pub rtc: Option<crate::rtc::Rtc>,
     pub rom: Vec<u8>,
     /// Extension ROM at $E00000 (AROS, CD32, CDTV).
     pub ext_rom: Vec<u8>,
@@ -201,21 +201,18 @@ impl Board {
             chip: vec![0; chip_size],
             chip_mask: chip_size as u32 - 1,
             slow: vec![0; cfg.slow_kb as usize * 1024],
-            fast: vec![0; cfg.fast_kb as usize * 1024],
-            fast_base: None,
             mb_ram: vec![0; cfg.mb_kb as usize * 1024],
-            z3_ram: vec![0; cfg.z3_kb as usize * 1024],
-            z3_base: None,
-            z3_ac_done: false,
-            autoconfig_done: false,
+            exp: Expansion::new(expansion_cards(&cfg)),
             scsi: (cfg.model == crate::config::Model::A3000).then(A2091::new_a3000),
+            builtin: (cfg.model == crate::config::Model::A4000T)
+                .then(|| Box::new(crate::a4091::A4000tScsi::new()) as Box<dyn crate::expansion::Controller>),
             gayle: match cfg.model {
                 crate::config::Model::A600 | crate::config::Model::A1200 => Some(crate::gayle::Gayle::new()),
-                crate::config::Model::A4000 => Some(crate::gayle::Gayle::new_a4000()),
+                crate::config::Model::A4000 | crate::config::Model::A4000T => Some(crate::gayle::Gayle::new_a4000()),
                 _ => None,
             },
             akiko: (cfg.model == crate::config::Model::Cd32).then(crate::akiko::Akiko::new),
-            scsi_ac_done: false,
+            rtc: cfg.rtc.map(crate::rtc::Rtc::new),
             rom,
             rom_mask,
             ext_rom: vec![],
@@ -310,6 +307,11 @@ impl Board {
             (_, Some(s)) => Some(s.activity),
             _ => None,
         };
+        let io: u64 = self.exp.cards.iter().filter_map(|c| match &c.dev {
+            Device::Io(d) => Some(d.activity()),
+            _ => None,
+        }).chain(self.builtin.as_ref().map(|d| d.activity())).sum();
+        let hd = if io > 0 { Some(hd.unwrap_or(0).wrapping_add(io)) } else { hd };
         Leds { power: pra & 2 == 0, floppy, hd }
     }
 
@@ -392,11 +394,10 @@ impl Board {
         self.blitter.pending = None;
         self.blitter.busy_until = None;
         self.ciab_prb_prev = 0xff;
-        self.fast_base = None;
-        self.autoconfig_done = false;
-        self.scsi_ac_done = false;
-        self.z3_base = None;
-        self.z3_ac_done = false;
+        self.exp.reset();
+        for d in self.controllers() {
+            d.reset();
+        }
         if let Some(s) = self.scsi.as_mut() {
             s.reset();
         }
@@ -621,7 +622,13 @@ impl Board {
                 *slot = d.pending_seek.take();
             }
         }
-        for lba in seeks.into_iter().flatten() {
+        let mut rest = vec![];
+        for d in self.controllers() {
+            if let Some(disks) = d.disks() {
+                rest.extend(disks.iter_mut().flatten().filter_map(|d| d.pending_seek.take()));
+            }
+        }
+        for lba in seeks.into_iter().flatten().chain(rest) {
             self.audio.mech.hard_disk_access(lba);
         }
     }
@@ -948,10 +955,15 @@ impl Board {
 
     fn update_cia_irq(&mut self) {
         // Expansion boards share Paula's INT2 input with CIA-A.
-        if self.cia_a.irq() || self.scsi.as_ref().is_some_and(|s| s.irq()) || self.gayle.as_ref().is_some_and(|g| g.irq()) {
+        if self.cia_a.irq()
+            || self.scsi.as_ref().is_some_and(|s| s.irq())
+            || self.gayle.as_ref().is_some_and(|g| g.irq())
+            || self.exp.cards.iter().any(|c| matches!(&c.dev, Device::Io(d) if d.irq()))
+            || self.builtin.as_ref().is_some_and(|d| d.irq())
+        {
             self.intreq |= int::PORTS;
         }
-        if self.cia_b.irq() {
+        if self.cia_b.irq() || self.gayle.as_ref().is_some_and(|g| g.irq6()) {
             self.intreq |= int::EXTER;
         }
     }
@@ -1323,36 +1335,26 @@ impl Board {
         }
     }
 
-    // ---- autoconfig (Zorro II fast RAM, then the SCSI controller) --------------
+    // ---- autoconfig -----------------------------------------------------------
 
-    fn autoconfig_regs(&self) -> Option<[u8; 16]> {
-        if !self.fast.is_empty() && !self.autoconfig_done {
-            // er_Type: Zorro II, memory, link to free pool; size code.
-            let size_code: u8 = match self.fast.len() / 1024 {
-                64 => 1,
-                128 => 2,
-                256 => 3,
-                512 => 4,
-                1024 => 5,
-                2048 => 6,
-                4096 => 7,
-                _ => 0,
-            };
-            return Some([
-                0xc0 | 0x20 | size_code, // er_Type (not inverted)
-                0x01,                    // er_Product
-                0x80,                    // er_Flags: memory space preferred
-                0x00,
-                0x07, // manufacturer hi
-                0xdb, // manufacturer lo
-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            ]);
-        }
-        if self.scsi.as_ref().is_some_and(|s| !s.a3000) && !self.scsi_ac_done {
-            return Some(A2091::autoconfig_regs());
-        }
-        None
+    /// Add a board's cards to the autoconfig chain (before power-on or reset).
+    /// Zorro II cards go ahead of Zorro III ones.
+    /// The I/O boards on the chain, then the motherboard controller.
+    pub fn controllers(&mut self) -> impl Iterator<Item = &mut Box<dyn crate::expansion::Controller>> {
+        self.exp.io().chain(self.builtin.iter_mut())
     }
+
+    pub fn add_cards(&mut self, cards: Vec<Card>) {
+        for c in cards {
+            let at = if c.ac.zorro3 {
+                self.exp.cards.len()
+            } else {
+                self.exp.cards.iter().position(|x| x.ac.zorro3).unwrap_or(self.exp.cards.len())
+            };
+            self.exp.cards.insert(at, c);
+        }
+    }
+
 
     /// Ramsey (A3000/A4000 memory controller): control at $DE0003, revision at
     /// $DE0043. Fat Gary's registers in the same block read as zero.
@@ -1370,121 +1372,11 @@ impl Board {
         }
     }
 
-    /// Zorro III RAM board configuration registers, while unconfigured.
-    fn z3_autoconfig_regs(&self) -> Option<[u8; 16]> {
-        if self.z3_ram.is_empty() || self.z3_ac_done {
-            return None;
-        }
-        let mb = self.z3_ram.len() >> 20;
-        // Sizes of 16 MB and up use the extended size codes.
-        let (code, ext): (u8, u8) = match mb {
-            16 => (0, 0x20),
-            32 => (1, 0x20),
-            64 => (2, 0x20),
-            128 => (3, 0x20),
-            256 => (4, 0x20),
-            512 => (5, 0x20),
-            1024 => (6, 0x20),
-            8 => (0, 0),
-            4 => (7, 0),
-            2 => (6, 0),
-            _ => (5, 0),
-        };
-        Some([
-            0x80 | 0x20 | code, // er_Type: Zorro III, memory list
-            0x02,
-            0x80 | 0x10 | ext, // er_Flags: memory space, Zorro III, extended size
-            0x00,
-            0x07,
-            0xdb,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        ])
-    }
-
-    /// Zorro III configuration space at $FF000000: each register's high
-    /// nibble is at `offset`, its low nibble at `offset + $100`.
-    fn z3_config_read(&self, addr: u32) -> u8 {
-        let Some(regs) = self.z3_autoconfig_regs() else {
-            return 0xff;
-        };
-        let off = (addr & 0xff) as usize;
-        let idx = off / 4;
-        let byte = if idx < 16 { regs[idx] } else { 0 };
-        let nib = if addr & 0x100 == 0 { byte >> 4 } else { byte & 15 };
-        // Registers $00 and $40 up are not inverted.
-        let nib = if idx == 0 || idx >= 16 { nib } else { !nib & 15 };
-        nib << 4 | 0x0f
-    }
-
-    fn z3_config_write(&mut self, addr: u32, v: u16, word: bool) {
-        if self.z3_autoconfig_regs().is_none() {
-            return;
-        }
-        match addr & 0xff {
-            // Expansion writes the base address bits A31-A16 as a word.
-            0x44 if word => {
-                self.z3_base = Some((v as u32) << 16);
-                self.z3_ac_done = true;
-                log::debug!("Zorro III RAM configured at {:08x}", (v as u32) << 16);
-            }
-            0x44 => self.z3_base = Some((self.z3_base.unwrap_or(0) & 0x00ff_0000) | (v as u32 & 0xff) << 24),
-            0x45 => self.z3_base = Some((self.z3_base.unwrap_or(0) & 0xff00_0000) | (v as u32 & 0xff) << 16),
-            // Zorro II-style low address byte: written before the $44 word.
-            0x48 => {}
-            0x4c => self.z3_ac_done = true,
-            _ => {}
-        }
-    }
-
-    fn autoconfig_read(&self, addr: u32) -> u8 {
-        let Some(regs) = self.autoconfig_regs() else {
-            return 0xff;
-        };
-        let off = (addr & 0xff) as usize;
-        let idx = off / 4;
-        let nibble_hi = off & 2 == 0;
-        let byte = if idx < 16 { regs[idx] } else { 0 };
-        let nib = if nibble_hi { byte >> 4 } else { byte & 15 };
-        // All registers except er_Type are read inverted.
-        let nib = if idx == 0 { nib } else { !nib & 15 };
-        nib << 4 | 0x0f
-    }
-
-    fn autoconfig_write(&mut self, addr: u32, v: u8) {
-        if !self.fast.is_empty() && !self.autoconfig_done {
-            match addr & 0xff {
-                0x48 => {
-                    self.fast_base = Some((v as u32 >> 4) << 20 | (self.fast_base.unwrap_or(0) & 0x0f_0000));
-                    self.autoconfig_done = true;
-                }
-                0x4a => {
-                    self.fast_base = Some((self.fast_base.unwrap_or(0) & 0xf0_0000) | (v as u32 >> 4) << 16);
-                }
-                0x4c => self.autoconfig_done = true,
-                _ => {}
-            }
-        } else if let Some(s) = self.scsi.as_mut().filter(|s| !self.scsi_ac_done && !s.a3000) {
-            match addr & 0xff {
-                0x48 => {
-                    s.base = Some((v as u32 >> 4) << 20 | (s.base.unwrap_or(0) & 0x0f_0000));
-                    self.scsi_ac_done = true;
-                    log::debug!("a2091 configured at {:06x}", s.base.unwrap());
-                }
-                0x4a => s.base = Some((s.base.unwrap_or(0) & 0xf0_0000) | (v as u32 >> 4) << 16),
-                0x4c => self.scsi_ac_done = true,
-                _ => {}
-            }
-        }
-    }
-
     // ---- SCSI controller --------------------------------------------------------
 
     fn scsi_tick(&mut self) {
-        if self.scsi.is_none() {
-            return;
-        }
         let now = self.cck * 2;
-        while let Some(dma) = self.scsi.as_mut().unwrap().tick(now) {
+        while let Some(dma) = self.scsi.as_mut().and_then(|s| s.tick(now)) {
             match dma {
                 Dma::ToMemory(addr, data) => {
                     for (i, b) in data.into_iter().enumerate() {
@@ -1497,6 +1389,20 @@ impl Board {
                 }
             }
         }
+        for i in 0..self.exp.cards.len() {
+            if !matches!(self.exp.cards[i].dev, Device::Io(_)) {
+                continue;
+            }
+            let mut dev = std::mem::replace(&mut self.exp.cards[i].dev, Device::Busy);
+            if let Device::Io(d) = &mut dev {
+                d.tick(now, &mut DmaPort(self));
+            }
+            self.exp.cards[i].dev = dev;
+        }
+        if let Some(mut d) = self.builtin.take() {
+            d.tick(now, &mut DmaPort(self));
+            self.builtin = Some(d);
+        }
         self.update_cia_irq();
     }
 
@@ -1504,9 +1410,8 @@ impl Board {
         match self.region(a, true) {
             Region::Chip(o) => self.chip[o] = v,
             Region::Slow(o) => self.slow[o] = v,
-            Region::Fast(o) => self.fast[o] = v,
             Region::Mb(o) => self.mb_ram[o] = v,
-            Region::Z3(o) => self.z3_ram[o] = v,
+            Region::Ram(i, o) => self.exp.ram(i).unwrap()[o] = v,
             _ => {}
         }
     }
@@ -1515,20 +1420,10 @@ impl Board {
         match self.region(a, false) {
             Region::Chip(o) => self.chip[o],
             Region::Slow(o) => self.slow[o],
-            Region::Fast(o) => self.fast[o],
             Region::Mb(o) => self.mb_ram[o],
-            Region::Z3(o) => self.z3_ram[o],
+            Region::Ram(i, o) => self.exp.ram_ref(i)[o],
             _ => 0,
         }
-    }
-
-    fn fast_offset(&self, a: u32) -> Option<usize> {
-        let base = self.fast_base?;
-        if !self.autoconfig_done {
-            return None;
-        }
-        let off = a.wrapping_sub(base) as usize;
-        (off < self.fast.len()).then_some(off)
     }
 
     // ---- input helpers --------------------------------------------------------
@@ -1554,12 +1449,15 @@ impl Board {
         match self.region(addr & !1, false) {
             Region::Chip(o) => b(o, &self.chip),
             Region::Slow(o) => b(o, &self.slow),
-            Region::Fast(o) => b(o, &self.fast),
             Region::Mb(o) => b(o, &self.mb_ram),
-            Region::Z3(o) => b(o, &self.z3_ram),
+            Region::Ram(i, o) => b(o, self.exp.ram_ref(i)),
             Region::Rom(o) => b(o, &self.rom),
             Region::ExtRom(o) => b(o, &self.ext_rom),
             Region::Scsi(o) if o >= 0x2000 => self.scsi.as_ref().unwrap().peek_rom16(o),
+            Region::Io(i, o) => match &self.exp.cards[i].dev {
+                Device::Io(d) => d.peek16(o),
+                _ => 0,
+            },
             _ => 0,
         }
     }
@@ -1572,19 +1470,27 @@ impl Board {
 enum Region {
     Chip(usize),
     Slow(usize),
-    Fast(usize),
+    /// RAM on expansion card .0.
+    Ram(usize, usize),
     Rom(usize),
     ExtRom(usize),
     Custom,
     Cia,
     Autoconfig,
     Scsi(u32),
+    /// An I/O board on the chain: (card, offset).
+    Io(usize, u32),
+    /// The motherboard controller: offset.
+    Builtin(u32),
+    /// The A600/A1200 PCMCIA slot's memory windows.
+    Pcmcia,
     Gayle,
     Z3Config,
     Mb(usize),
-    Z3(usize),
     Ramsey,
     Akiko,
+    /// The clock: one nibble per 4 bytes, in the low bits of the odd byte.
+    Rtc,
     None,
 }
 
@@ -1603,11 +1509,11 @@ impl Board {
                     Region::Chip((a & self.chip_mask) as usize)
                 }
             }
-            0x20..=0x9f => match self.fast_offset(a) {
-                Some(o) => Region::Fast(o),
-                None => Region::None,
-            },
+            0x60..=0x9f if self.exp.lookup24(a).is_none() && self.gayle.as_ref().is_some_and(|g| g.card_present()) => Region::Pcmcia,
+            0x20..=0x9f => self.card_region(self.exp.lookup24(a)),
+            0xa0..=0xa3 if self.gayle.as_ref().is_some_and(|g| g.card_present()) => Region::Pcmcia,
             0xb8 if self.akiko.is_some() => Region::Akiko,
+            0xdc if self.rtc.is_some() => Region::Rtc,
             0xa0..=0xbf => Region::Cia,
             0xc0..=0xd7 => {
                 let off = (a - 0xc0_0000) as usize;
@@ -1623,13 +1529,12 @@ impl Board {
             }
             0xdf => Region::Custom,
             0xd8..=0xdb | 0xde if self.gayle.as_ref().is_some_and(|g| !g.a4000) => Region::Gayle,
+            0xdd if self.builtin.is_some() && (a & 0xff40) == 0x0040 => Region::Builtin(a & 0x3f),
             0xdd if self.gayle.as_ref().is_some_and(|g| g.a4000) => Region::Gayle,
             0xde if self.cfg.model.addr32() => Region::Ramsey,
             0xe8 => Region::Autoconfig,
             0xdd if self.scsi.as_ref().is_some_and(|s| s.a3000) => Region::Scsi(a & 0xffff),
-            0xe9..=0xef if self.scsi.as_ref().and_then(|s| s.contains(a)).is_some() => {
-                Region::Scsi(self.scsi.as_ref().unwrap().contains(a).unwrap())
-            }
+            0xe9..=0xef if self.exp.lookup24(a).is_some() => self.card_region(self.exp.lookup24(a)),
             0xf8..=0xff => Region::Rom((a & self.rom_mask) as usize),
             0xe0..=0xe7 if !self.ext_rom.is_empty() => Region::ExtRom((a as usize - 0xe0_0000) % self.ext_rom.len()),
             0xe0..=0xe7 if self.rom.len() > 0x80000 => Region::Rom((a & self.rom_mask) as usize),
@@ -1643,18 +1548,68 @@ impl Board {
     }
 }
 
+/// The autoconfig chain a configuration asks for: the generic fast RAM sizes
+/// (`--fast`, `--z3`, RP9 RAM), then the boards chosen with `--board`.
+fn expansion_cards(cfg: &Config) -> Vec<Card> {
+    let mut specs: Vec<(&str, registry::Options)> = vec![];
+    let size = |kb: u32| registry::Options(vec![("ram".into(), format!("{kb}K"))]);
+    if cfg.fast_kb > 0 {
+        specs.push(("z2ram", size(cfg.fast_kb)));
+    }
+    for b in &cfg.boards {
+        specs.push((b.id.as_str(), b.opts.clone()));
+    }
+    if cfg.z3_kb > 0 {
+        specs.push(("z3ram", size(cfg.z3_kb)));
+    }
+    let mut cards: Vec<Card> = vec![];
+    for (id, opts) in specs {
+        match registry::find(id).map(|b| b.build(&opts)) {
+            Some(Ok(p)) => cards.extend(p.cards),
+            Some(Err(e)) => log::error!("{id}: {e}"),
+            None => log::error!("unknown board {id}"),
+        }
+    }
+    // Zorro II boards come first in the chain.
+    cards.sort_by_key(|c| c.ac.zorro3);
+    cards
+}
+
+/// Memory as DMA from an expansion board reaches it.
+struct DmaPort<'a>(&'a mut Board);
+
+impl crate::expansion::DmaMem for DmaPort<'_> {
+    fn read8(&mut self, a: u32) -> u8 {
+        self.0.dma_peek(a)
+    }
+    fn write8(&mut self, a: u32, v: u8) {
+        self.0.dma_poke(a, v)
+    }
+}
+
 impl Board {
+    /// The region of a configured expansion card at (card, offset).
+    #[inline]
+    fn card_region(&self, hit: Option<(usize, u32)>) -> Region {
+        match hit {
+            Some((i, o)) => match self.exp.cards[i].dev {
+                Device::Ram(_) => Region::Ram(i, o as usize),
+                Device::A2091 => Region::Scsi(o),
+                Device::Io(_) => Region::Io(i, o),
+                Device::Busy => Region::None,
+            },
+            None => Region::None,
+        }
+    }
+
     /// Addresses above 16 MB on 32-bit machines.
     fn region32(&self, a: u32) -> Region {
         let mb_start = 0x0800_0000 - self.mb_ram.len() as u32;
         if (mb_start..0x0800_0000).contains(&a) {
             return Region::Mb((a - mb_start) as usize);
         }
-        if let Some(b) = self.z3_base.filter(|_| self.z3_ac_done) {
-            let off = a.wrapping_sub(b) as usize;
-            if off < self.z3_ram.len() {
-                return Region::Z3(off);
-            }
+        if let Some(c) = self.exp.lookup32(a) {
+            return self.card_region(Some(c));
         }
         if a >> 24 == 0xff {
             return Region::Z3Config;
@@ -1674,21 +1629,17 @@ impl Bus for Board {
                 self.chip_access();
                 self.slow[o]
             }
-            Region::Fast(o) => {
+            Region::Ram(i, o) => {
                 self.cpu_cycles(4);
-                self.fast[o]
+                self.exp.ram_ref(i)[o]
             }
             Region::Mb(o) => {
                 self.cpu_cycles(4);
                 self.mb_ram[o]
             }
-            Region::Z3(o) => {
-                self.cpu_cycles(4);
-                self.z3_ram[o]
-            }
             Region::Z3Config => {
                 self.cpu_cycles(4);
-                self.z3_config_read(addr)
+                self.exp.z3_config_read(addr)
             }
             Region::Ramsey => {
                 self.cpu_cycles(4);
@@ -1697,6 +1648,14 @@ impl Bus for Board {
             Region::Akiko => {
                 self.cpu_cycles(4);
                 self.akiko.as_mut().map_or(0, |a| a.read8(addr))
+            }
+            Region::Rtc => {
+                self.cpu_cycles(4);
+                if addr & 1 == 0 {
+                    0
+                } else {
+                    self.rtc.as_ref().unwrap().read((addr as usize >> 2) & 15)
+                }
             }
             Region::Rom(o) => {
                 self.cpu_cycles(4);
@@ -1726,11 +1685,29 @@ impl Bus for Board {
             }
             Region::Autoconfig => {
                 self.cpu_cycles(4);
-                self.autoconfig_read(addr)
+                self.exp.z2_config_read(addr)
             }
             Region::Gayle => {
                 self.cpu_cycles(4);
                 let v = self.gayle.as_mut().unwrap().read8(addr);
+                self.update_cia_irq();
+                v
+            }
+            Region::Builtin(o) => {
+                self.cpu_cycles(4);
+                let now = self.cycles;
+                let v = self.builtin.as_mut().unwrap().read8(o, now);
+                self.update_cia_irq();
+                v
+            }
+            Region::Pcmcia => {
+                self.cpu_cycles(4);
+                self.gayle.as_ref().unwrap().card_read8(addr)
+            }
+            Region::Io(i, o) => {
+                self.cpu_cycles(4);
+                let now = self.cycles;
+                let v = self.exp.io_at(i).read8(o, now);
                 self.update_cia_irq();
                 v
             }
@@ -1762,21 +1739,18 @@ impl Bus for Board {
                 self.chip_access();
                 (self.slow[o] as u16) << 8 | self.slow[o + 1] as u16
             }
-            Region::Fast(o) => {
+            Region::Ram(i, o) => {
                 self.cpu_cycles(4);
-                (self.fast[o] as u16) << 8 | self.fast[o + 1] as u16
+                let r = self.exp.ram_ref(i);
+                (r[o] as u16) << 8 | r[o + 1] as u16
             }
             Region::Mb(o) => {
                 self.cpu_cycles(4);
                 (self.mb_ram[o] as u16) << 8 | self.mb_ram[o + 1] as u16
             }
-            Region::Z3(o) => {
-                self.cpu_cycles(4);
-                (self.z3_ram[o] as u16) << 8 | self.z3_ram[o + 1] as u16
-            }
             Region::Z3Config => {
                 self.cpu_cycles(4);
-                (self.z3_config_read(addr) as u16) << 8 | 0xff
+                (self.exp.z3_config_read(addr) as u16) << 8 | 0xff
             }
             Region::Ramsey => {
                 self.cpu_cycles(4);
@@ -1786,6 +1760,10 @@ impl Bus for Board {
                 self.cpu_cycles(4);
                 let a = self.akiko.as_mut().unwrap();
                 (a.read8(addr) as u16) << 8 | a.read8(addr + 1) as u16
+            }
+            Region::Rtc => {
+                self.cpu_cycles(4);
+                self.rtc.as_ref().unwrap().read((addr as usize >> 2) & 15) as u16
             }
             Region::Rom(o) => {
                 self.cpu_cycles(4);
@@ -1805,11 +1783,30 @@ impl Bus for Board {
             }
             Region::Autoconfig => {
                 self.cpu_cycles(4);
-                (self.autoconfig_read(addr) as u16) << 8 | 0xff
+                (self.exp.z2_config_read(addr) as u16) << 8 | 0xff
             }
             Region::Gayle => {
                 self.cpu_cycles(4);
                 let v = self.gayle.as_mut().unwrap().read16(addr);
+                self.update_cia_irq();
+                v
+            }
+            Region::Builtin(o) => {
+                self.cpu_cycles(4);
+                let now = self.cycles;
+                let v = self.builtin.as_mut().unwrap().read16(o, now);
+                self.update_cia_irq();
+                v
+            }
+            Region::Pcmcia => {
+                self.cpu_cycles(4);
+                let g = self.gayle.as_ref().unwrap();
+                (g.card_read8(addr) as u16) << 8 | g.card_read8(addr | 1) as u16
+            }
+            Region::Io(i, o) => {
+                self.cpu_cycles(4);
+                let now = self.cycles;
+                let v = self.exp.io_at(i).read16(o, now);
                 self.update_cia_irq();
                 v
             }
@@ -1840,21 +1837,17 @@ impl Bus for Board {
                 self.chip_access();
                 self.slow[o] = v;
             }
-            Region::Fast(o) => {
+            Region::Ram(i, o) => {
                 self.cpu_cycles(4);
-                self.fast[o] = v;
+                self.exp.ram(i).unwrap()[o] = v;
             }
             Region::Mb(o) => {
                 self.cpu_cycles(4);
                 self.mb_ram[o] = v;
             }
-            Region::Z3(o) => {
-                self.cpu_cycles(4);
-                self.z3_ram[o] = v;
-            }
             Region::Z3Config => {
                 self.cpu_cycles(4);
-                self.z3_config_write(addr, v as u16, false);
+                self.exp.z3_config_write(addr, v as u16, false);
             }
             Region::Ramsey => {
                 self.cpu_cycles(4);
@@ -1864,6 +1857,12 @@ impl Bus for Board {
                 self.cpu_cycles(4);
                 if let Some(a) = self.akiko.as_mut() {
                     a.write8(addr, v);
+                }
+            }
+            Region::Rtc => {
+                self.cpu_cycles(4);
+                if addr & 1 != 0 {
+                    self.rtc.as_mut().unwrap().write((addr as usize >> 2) & 15, v);
                 }
             }
             Region::Custom => {
@@ -1878,11 +1877,27 @@ impl Bus for Board {
             }
             Region::Autoconfig => {
                 self.cpu_cycles(4);
-                self.autoconfig_write(addr, v);
+                self.exp.z2_config_write(addr, v);
             }
             Region::Gayle => {
                 self.cpu_cycles(4);
                 self.gayle.as_mut().unwrap().write8(addr, v);
+                self.update_cia_irq();
+            }
+            Region::Builtin(o) => {
+                self.cpu_cycles(4);
+                let now = self.cycles;
+                self.builtin.as_mut().unwrap().write8(o, v, now);
+                self.update_cia_irq();
+            }
+            Region::Pcmcia => {
+                self.cpu_cycles(4);
+                self.gayle.as_mut().unwrap().card_write8(addr, v);
+            }
+            Region::Io(i, o) => {
+                self.cpu_cycles(4);
+                let now = self.cycles;
+                self.exp.io_at(i).write8(o, v, now);
                 self.update_cia_irq();
             }
             Region::Scsi(o) => {
@@ -1909,24 +1924,20 @@ impl Bus for Board {
                 self.slow[o] = (v >> 8) as u8;
                 self.slow[o + 1] = v as u8;
             }
-            Region::Fast(o) => {
+            Region::Ram(i, o) => {
                 self.cpu_cycles(4);
-                self.fast[o] = (v >> 8) as u8;
-                self.fast[o + 1] = v as u8;
+                let r = self.exp.ram(i).unwrap();
+                r[o] = (v >> 8) as u8;
+                r[o + 1] = v as u8;
             }
             Region::Mb(o) => {
                 self.cpu_cycles(4);
                 self.mb_ram[o] = (v >> 8) as u8;
                 self.mb_ram[o + 1] = v as u8;
             }
-            Region::Z3(o) => {
-                self.cpu_cycles(4);
-                self.z3_ram[o] = (v >> 8) as u8;
-                self.z3_ram[o + 1] = v as u8;
-            }
             Region::Z3Config => {
                 self.cpu_cycles(4);
-                self.z3_config_write(addr, v, true);
+                self.exp.z3_config_write(addr, v, true);
             }
             Region::Ramsey => {
                 self.cpu_cycles(4);
@@ -1940,6 +1951,10 @@ impl Bus for Board {
                     a.write8(addr + 1, v as u8);
                 }
             }
+            Region::Rtc => {
+                self.cpu_cycles(4);
+                self.rtc.as_mut().unwrap().write((addr as usize >> 2) & 15, v as u8);
+            }
             Region::Custom => {
                 self.chip_access();
                 self.custom_write_reg((addr & 0x1fe) as u16, v);
@@ -1950,11 +1965,29 @@ impl Bus for Board {
             }
             Region::Autoconfig => {
                 self.cpu_cycles(4);
-                self.autoconfig_write(addr, (v >> 8) as u8);
+                self.exp.z2_config_write(addr, (v >> 8) as u8);
             }
             Region::Gayle => {
                 self.cpu_cycles(4);
                 self.gayle.as_mut().unwrap().write16(addr, v);
+                self.update_cia_irq();
+            }
+            Region::Builtin(o) => {
+                self.cpu_cycles(4);
+                let now = self.cycles;
+                self.builtin.as_mut().unwrap().write16(o, v, now);
+                self.update_cia_irq();
+            }
+            Region::Pcmcia => {
+                self.cpu_cycles(4);
+                let g = self.gayle.as_mut().unwrap();
+                g.card_write8(addr, (v >> 8) as u8);
+                g.card_write8(addr | 1, v as u8);
+            }
+            Region::Io(i, o) => {
+                self.cpu_cycles(4);
+                let now = self.cycles;
+                self.exp.io_at(i).write16(o, v, now);
                 self.update_cia_irq();
             }
             Region::Scsi(o) => {

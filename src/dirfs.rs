@@ -37,6 +37,12 @@ enum Node {
 /// Build a partition image (international FFS, `DOS\3`) holding the contents of
 /// `dir`, with volume name `volume`.
 pub fn build(dir: &Path, volume: &str) -> Result<Vec<u8>, String> {
+    build_sized(dir, volume, None)
+}
+
+/// As `build`, but with `size`, the volume fills exactly that many bytes (a
+/// memory card); an error if the contents do not fit.
+pub fn build_sized(dir: &Path, volume: &str, size: Option<usize>) -> Result<Vec<u8>, String> {
     let mut stats = Stats::default();
     let children = read_dir(dir, false, &mut stats)?;
     if stats.truncated > 0 {
@@ -58,8 +64,20 @@ pub fn build(dir: &Path, volume: &str) -> Result<Vec<u8>, String> {
             .sum()
     }
     let used = count(&children) + 1;
-    let want = used + used / 8 + FREE_BYTES / BSIZE as u64 + RESERVED as u64;
-    let blocks = (want.div_ceil(CYL_BLOCKS as u64) * CYL_BLOCKS as u64) as u32;
+    let blocks = match size {
+        Some(bytes) => {
+            let blocks = (bytes / BSIZE) as u32;
+            // Bitmap blocks and the root come on top of the contents.
+            if used + used / 8 + RESERVED as u64 + 4 > blocks as u64 {
+                return Err(format!("{}: does not fit in {} KB", dir.display(), bytes / 1024));
+            }
+            blocks
+        }
+        None => {
+            let want = used + used / 8 + FREE_BYTES / BSIZE as u64 + RESERVED as u64;
+            (want.div_ceil(CYL_BLOCKS as u64) * CYL_BLOCKS as u64) as u32
+        }
+    };
     let mut fs = Fs::new(blocks);
 
     let now = amiga_date(std::time::SystemTime::now());

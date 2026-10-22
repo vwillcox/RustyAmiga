@@ -106,10 +106,25 @@ struct Args {
     /// order. Writes stay in memory and are not saved back.
     #[arg(long = "hdf")]
     hdf: Vec<PathBuf>,
+    /// CD-ROM image (ISO 9660) in a SCSI CD-ROM drive, at the first free SCSI ID
+    /// after the hard disks.
+    #[arg(long = "cd")]
+    cd: Option<PathBuf>,
+    /// SRAM memory card for the A600/A1200 PCMCIA slot: an image (up to 4 MB),
+    /// or a folder, which becomes an FFS-formatted card. Writes stay in memory.
+    #[arg(long = "pcmcia")]
+    pcmcia: Option<PathBuf>,
     /// Host folders to mount as hard disks after the HDFs (built into an FFS
     /// volume named after the folder when the machine starts; writes stay in memory).
     #[arg(long = "dir-hd")]
     dir_hd: Vec<PathBuf>,
+    /// Add-on board, e.g. "a2058:ram=8M" or "a2091:ram=2M" (repeatable, in slot
+    /// order). --list-boards shows them all.
+    #[arg(long = "board")]
+    boards: Vec<String>,
+    /// List the add-on boards and their options, then exit.
+    #[arg(long)]
+    list_boards: bool,
     /// Boot ROM for the SCSI controller (default: amiga-boot-a590.rom in --rom-dir).
     #[arg(long)]
     scsi_rom: Option<PathBuf>,
@@ -240,6 +255,7 @@ fn default_roms(model: Model) -> Vec<&'static str> {
         Model::A1200 => vec!["amiga-os-310-a1200.rom"],
         Model::A3000 => vec!["amiga-os-310-a3000.rom"],
         Model::A4000 => vec!["amiga-os-310-a4000.rom"],
+        Model::A4000T => vec!["amiga-os-310-a4000t.rom", "amiga-os-3x0-a4000t.rom"],
         Model::Cd32 => vec!["amiga-os-310-cd32.rom"],
         _ => vec!["amiga-os-130.rom"],
     }
@@ -253,6 +269,17 @@ fn main() {
         return;
     }
     let args = Args::parse();
+    if args.list_boards {
+        use std::io::Write;
+        let mut out = std::io::stdout().lock();
+        for b in amiga::expansion::registry::BOARDS {
+            let line = format!("{:16} {} ({} {}), {}; options: {}", b.id, b.name, b.maker, b.year, b.slot.describe(), b.options);
+            if writeln!(out, "{line}").is_err() {
+                break;
+            }
+        }
+        return;
+    }
 
     // Floppies to insert (name, data, writable path).
     let mut floppies: Vec<frontend::SwapDisk> = vec![];
@@ -348,6 +375,24 @@ fn main() {
     }
     if let Some(z) = args.z3 {
         cfg.z3_kb = z;
+    }
+    for spec in &args.boards {
+        let (info, opts) = amiga::expansion::registry::parse_spec(spec).unwrap_or_else(|e| die(e));
+        if !info.slot.fits(model) {
+            die(format!("{} does not fit the {model:?}", info.name));
+        }
+        let parts = info.build(&opts).unwrap_or_else(|e| die(format!("{}: {e}", info.id)));
+        // Trapdoor boards change the machine's own RAM and add a clock.
+        if let Some(kb) = parts.slow_kb {
+            cfg.slow_kb = kb;
+        }
+        if let Some(kb) = parts.chip_kb {
+            cfg.chip_kb = kb;
+        }
+        if parts.rtc.is_some() {
+            cfg.rtc = parts.rtc;
+        }
+        cfg.boards.push(amiga::config::BoardSpec { id: info.id.to_string(), opts });
     }
     if rp9.as_ref().is_some_and(|r| r.jit || r.cpu_max) {
         // Packages asking for a JIT or the fastest CPU (speed="max") expect far
@@ -447,42 +492,100 @@ fn main() {
     }
 
     let mut amiga = Amiga::new(cfg, rom.data);
+    // I/O boards on the chain need their boot ROMs.
+    for d in amiga.board.exp.io() {
+        if !d.has_rom() && !d.rom_files().is_empty() {
+            let path = find_rom(&args, d.rom_files());
+            let data = amiga::rom::load_raw(&path, args.rom_key.as_deref()).unwrap_or_else(|e| die(e));
+            d.set_rom(data).unwrap_or_else(|e| die(format!("{}: {e}", path.display())));
+        }
+    }
+    // A disk controller chosen with --board takes the hard disks, ahead of the
+    // model's own; on the A4000T its SCSI controller does.
+    if let Some(disks) = amiga.board.controllers().find_map(|d| d.disks()) {
+        if hdfs.len() > 7 {
+            die("at most 7 hard disks are supported");
+        }
+        for (i, (name, data, ro)) in std::mem::take(&mut hdfs).into_iter().enumerate() {
+            log::info!("SCSI unit {i}: {name} ({} KB)", data.len() / 1024);
+            disks[i] = Some(amiga::scsi::HardDisk::new(name, data, ro));
+        }
+    }
     if !hdfs.is_empty() && amiga.board.gayle.is_some() {
         // A600/A1200: the internal IDE port takes a master and a slave.
         if hdfs.len() > 2 {
             die("the A600/A1200 IDE port takes at most 2 hard disks");
         }
         let g = amiga.board.gayle.as_mut().unwrap();
-        for (i, (name, data, _ro)) in hdfs.into_iter().enumerate() {
+        for (i, (name, data, _ro)) in std::mem::take(&mut hdfs).into_iter().enumerate() {
             log::info!("IDE {}: {name} ({} KB)", if i == 0 { "master" } else { "slave" }, data.len() / 1024);
             g.drives[i] = Some(amiga::gayle::AtaDrive::new(name, data));
         }
-    } else if !hdfs.is_empty() {
+    }
+    // The A3000's own SCSI controller is already fitted; elsewhere the disks and
+    // the CD-ROM drive go on an A590/A2091 (added unless --board chose one).
+    let has_scsi = amiga.board.scsi.is_some()
+        || amiga.board.exp.cards.iter().any(|c| matches!(c.dev, amiga::expansion::Device::A2091))
+        || amiga.board.controllers().any(|d| d.disks().is_some());
+    if !hdfs.is_empty() || (args.cd.is_some() && !has_scsi) {
         if hdfs.len() > 7 {
             die("at most 7 hard disks are supported");
         }
-        // The A3000's own SCSI controller is already fitted; elsewhere add an A590/A2091.
-        let mut ctl = match amiga.board.scsi.take() {
-            Some(c) => c,
-            None => {
-                let rom_path = args.scsi_rom.clone().unwrap_or_else(|| find_rom(&args, &["amiga-boot-a590.rom"]));
-                let rom = amiga::rom::load_raw(&rom_path, args.rom_key.as_deref()).unwrap_or_else(|e| die(e));
-                if rom.len() != 0x4000 {
-                    die(format!("{}: expected a 16 KB A590/A2091 boot ROM", rom_path.display()));
-                }
-                amiga::a2091::A2091::new(rom)
-            }
-        };
-        for (i, (name, data, ro)) in hdfs.into_iter().enumerate() {
-            log::info!("SCSI unit {i}: {name} ({} KB)", data.len() / 1024);
-            ctl.disks[i] = Some(amiga::a2091::HardDisk::new(name, data, ro));
+        if !has_scsi {
+            let info = amiga::expansion::registry::find("a2091").unwrap();
+            amiga.board.add_cards(info.build(&Default::default()).unwrap_or_else(|e| die(e)).cards);
         }
-        amiga.board.scsi = Some(ctl);
+    }
+    // An A2091 card on the chain needs its controller and boot ROM.
+    if amiga.board.scsi.is_none() && amiga.board.exp.cards.iter().any(|c| matches!(c.dev, amiga::expansion::Device::A2091)) {
+        let rom_path = args.scsi_rom.clone().unwrap_or_else(|| find_rom(&args, &["amiga-boot-a590.rom"]));
+        let rom = amiga::rom::load_raw(&rom_path, args.rom_key.as_deref()).unwrap_or_else(|e| die(e));
+        if rom.len() != 0x4000 {
+            die(format!("{}: expected a 16 KB A590/A2091 boot ROM", rom_path.display()));
+        }
+        amiga.board.scsi = Some(amiga::a2091::A2091::new(rom));
+    }
+    if amiga.board.gayle.is_none() {
+        if let Some(ctl) = amiga.board.scsi.as_mut() {
+            for (i, (name, data, ro)) in hdfs.into_iter().enumerate() {
+                log::info!("SCSI unit {i}: {name} ({} KB)", data.len() / 1024);
+                ctl.disks[i] = Some(amiga::a2091::HardDisk::new(name, data, ro));
+            }
+        }
+    }
+    if let Some(p) = &args.pcmcia {
+        let Some(g) = amiga.board.gayle.as_mut().filter(|g| !g.a4000) else { die("only the A600 and A1200 have a PCMCIA slot") };
+        // A folder becomes a card formatted with FFS, the smallest size that holds it.
+        let data = if p.is_dir() {
+            let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or("Card".into());
+            [512 << 10, 1 << 20, 2 << 20, 4 << 20]
+                .iter()
+                .find_map(|&n| amiga::dirfs::build_sized(p, &name, Some(n)).ok())
+                .unwrap_or_else(|| die(format!("{}: does not fit on a 4 MB memory card", p.display())))
+        } else {
+            std::fs::read(p).unwrap_or_else(|e| die(format!("{}: {e}", p.display())))
+        };
+        let card = amiga::gayle::SramCard::new(p.display().to_string(), data, false).unwrap_or_else(|e| die(e));
+        log::info!("PCMCIA: {} ({} KB SRAM card)", card.name, card.data.len() / 1024);
+        g.insert_card(card);
+    }
+    if let Some(p) = &args.cd {
+        let drive = amiga::scsi::HardDisk::cdrom(p).unwrap_or_else(|e| die(format!("{}: {e}", p.display())));
+        // The same controller as the hard disks; ID 7 is the controller's own.
+        let units: &mut [Option<amiga::scsi::HardDisk>] = if amiga.board.controllers().any(|d| d.disks().is_some()) {
+            amiga.board.controllers().find_map(|d| d.disks()).map(|v| &mut v[..7]).unwrap()
+        } else {
+            &mut amiga.board.scsi.as_mut().unwrap().disks
+        };
+        let Some(i) = units.iter().position(|u| u.is_none()) else { die("no free SCSI ID for the CD-ROM drive") };
+        log::info!("SCSI unit {i}: CD-ROM {} ({} MB)", p.display(), drive.blocks() / 512);
+        units[i] = Some(drive);
     }
     amiga.board.audio.stereo_separation = args.stereo_separation.clamp(0.0, 1.0);
     amiga.board.audio.mech.enabled = !args.no_drive_sounds;
     let has_hd = amiga.board.gayle.as_ref().is_some_and(|g| g.drives.iter().any(|d| d.is_some()))
-        || amiga.board.scsi.as_ref().is_some_and(|s| s.disks.iter().any(|d| d.is_some()));
+        || amiga.board.scsi.as_ref().is_some_and(|s| s.disks.iter().any(|d| d.is_some()))
+        || amiga.board.controllers().any(|d| d.disks().is_some_and(|v| v.iter().any(|d| d.is_some())));
     amiga.board.audio.mech.set_hard_disk(has_hd);
     let ext = args.ext_rom.clone().or_else(|| {
         // AROS ships its kernel split across a main and an extension ROM, and

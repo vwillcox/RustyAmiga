@@ -4,7 +4,7 @@
 //! images, usually carrying a Rigid Disk Block) attached as SCSI targets.
 
 /// Board offset where the boot ROM appears (the ROM repeats up to $FFFF).
-const ROM_OFFSET: u32 = 0x2000;
+pub const ROM_OFFSET: u32 = 0x2000;
 
 // DMAC control register (CNTR) bits.
 const CNTR_INTEN: u16 = 1 << 4;
@@ -34,166 +34,6 @@ const ASR_BSY: u8 = 0x20;
 const ASR_CIP: u8 = 0x10;
 const ASR_DBR: u8 = 0x01;
 
-// SCSI status bytes.
-const GOOD: u8 = 0x00;
-const CHECK_CONDITION: u8 = 0x02;
-
-/// A hard disk image attached as a SCSI target.
-pub struct HardDisk {
-    pub name: String,
-    pub data: Vec<u8>,
-    pub read_only: bool,
-    /// Sense key / additional sense code for REQUEST SENSE.
-    sense: (u8, u8),
-    /// Block of the last read or write, until the drive sounds collect it.
-    pub pending_seek: Option<u32>,
-}
-
-impl HardDisk {
-    pub fn new(name: String, data: Vec<u8>, read_only: bool) -> HardDisk {
-        HardDisk { name, data, read_only, sense: (0, 0), pending_seek: None }
-    }
-
-    fn blocks(&self) -> u32 {
-        (self.data.len() / 512) as u32
-    }
-
-    /// Geometry for MODE SENSE: from the RDB if there is one, else a plausible fake.
-    fn geometry(&self) -> (u32, u32, u32) {
-        let l = |o: usize| u32::from_be_bytes(self.data[o..o + 4].try_into().unwrap());
-        for blk in 0..16 {
-            let o = blk * 512;
-            if self.data.len() >= o + 512 && &self.data[o..o + 4] == b"RDSK" {
-                return (l(o + 64), l(o + 72), l(o + 68));
-            }
-        }
-        let (heads, secs) = (1, 32);
-        (self.blocks() / (heads * secs), heads, secs)
-    }
-
-    /// Run one SCSI command. Returns the status byte; data in is placed in
-    /// `out`, data out is taken from `data_out`.
-    fn execute(&mut self, cdb: &[u8], data_out: &[u8], out: &mut Vec<u8>) -> u8 {
-        let lba6 = || (cdb[1] as u32 & 0x1f) << 16 | (cdb[2] as u32) << 8 | cdb[3] as u32;
-        let len6 = || if cdb[4] == 0 { 256 } else { cdb[4] as u32 };
-        let lba10 = || u32::from_be_bytes([cdb[2], cdb[3], cdb[4], cdb[5]]);
-        let len10 = || (cdb[7] as u32) << 8 | cdb[8] as u32;
-        let ok = |s: &mut HardDisk| {
-            s.sense = (0, 0);
-            GOOD
-        };
-        match cdb[0] {
-            0x00 | 0x1b | 0x1e | 0x15 | 0x04 | 0x2f | 0x35 => ok(self),
-            0x03 => {
-                let mut s = vec![0u8; 18];
-                s[0] = 0x70;
-                s[2] = self.sense.0;
-                s[7] = 10;
-                s[12] = self.sense.1;
-                s.truncate((cdb[4] as usize).max(4));
-                out.extend(s);
-                ok(self)
-            }
-            0x12 => {
-                let mut d = vec![0u8; 36];
-                d[2] = 2;
-                d[3] = 2;
-                d[4] = 31;
-                d[8..16].copy_from_slice(b"AMIGA   ");
-                d[16..32].copy_from_slice(b"HARDFILE        ");
-                d[32..36].copy_from_slice(b"1.0 ");
-                d.truncate(cdb[4] as usize);
-                out.extend(d);
-                ok(self)
-            }
-            0x25 => {
-                out.extend((self.blocks() - 1).to_be_bytes());
-                out.extend(512u32.to_be_bytes());
-                ok(self)
-            }
-            0x1a => {
-                let (cyls, heads, secs) = self.geometry();
-                let page = cdb[2] & 0x3f;
-                let mut d = vec![0u8, 0, 0, 8];
-                d.extend((self.blocks() & 0xff_ffff).to_be_bytes());
-                d.extend(512u32.to_be_bytes());
-                if page == 3 || page == 0x3f {
-                    let mut p = vec![0u8; 24];
-                    p[0] = 3;
-                    p[1] = 22;
-                    p[10..12].copy_from_slice(&(secs as u16).to_be_bytes());
-                    p[12..14].copy_from_slice(&512u16.to_be_bytes());
-                    d.extend(p);
-                }
-                if page == 4 || page == 0x3f {
-                    let mut p = vec![0u8; 24];
-                    p[0] = 4;
-                    p[1] = 22;
-                    p[2..5].copy_from_slice(&cyls.to_be_bytes()[1..]);
-                    p[5] = heads as u8;
-                    d.extend(p);
-                }
-                d[0] = (d.len() - 1) as u8;
-                d.truncate(cdb[4] as usize);
-                out.extend(d);
-                ok(self)
-            }
-            0x08 | 0x28 => {
-                let (lba, n) = if cdb[0] == 0x08 { (lba6(), len6()) } else { (lba10(), len10()) };
-                self.pending_seek = Some(lba);
-                let (a, b) = (lba as usize * 512, (lba + n) as usize * 512);
-                if b > self.data.len() {
-                    self.sense = (5, 0x21);
-                    return CHECK_CONDITION;
-                }
-                out.extend_from_slice(&self.data[a..b]);
-                ok(self)
-            }
-            0x0a | 0x2a => {
-                let (lba, n) = if cdb[0] == 0x0a { (lba6(), len6()) } else { (lba10(), len10()) };
-                self.pending_seek = Some(lba);
-                let (a, b) = (lba as usize * 512, (lba + n) as usize * 512);
-                if self.read_only {
-                    self.sense = (7, 0x27);
-                    return CHECK_CONDITION;
-                }
-                if b > self.data.len() || data_out.len() < b - a {
-                    self.sense = (5, 0x21);
-                    return CHECK_CONDITION;
-                }
-                self.data[a..b].copy_from_slice(&data_out[..b - a]);
-                ok(self)
-            }
-            op => {
-                log::debug!("scsi: unsupported command {op:02x}");
-                self.sense = (5, 0x20);
-                CHECK_CONDITION
-            }
-        }
-    }
-
-    /// Bytes the host must send for a data-out command.
-    fn data_out_len(cdb: &[u8]) -> usize {
-        match cdb[0] {
-            0x0a => (if cdb[4] == 0 { 256 } else { cdb[4] as usize }) * 512,
-            0x2a => ((cdb[7] as usize) << 8 | cdb[8] as usize) * 512,
-            0x15 => cdb[4] as usize,
-            _ => 0,
-        }
-    }
-}
-
-
-/// Length of a SCSI command descriptor block, from its group code.
-fn cdb_len(op: u8) -> usize {
-    match op >> 5 {
-        0 => 6,
-        1 | 2 => 10,
-        5 => 12,
-        _ => 6,
-    }
-}
-
 /// A DMA transfer the board must carry out against system memory.
 pub enum Dma {
     /// Write these bytes to memory starting at the address.
@@ -201,6 +41,9 @@ pub enum Dma {
     /// Read this many bytes from memory at the address, then call `dma_done`.
     FromMemory(u32, usize),
 }
+
+pub use crate::scsi::HardDisk;
+use crate::scsi::{cdb_len, CHECK_CONDITION, GOOD};
 
 /// SCSI bus phases, numbered by their MSG/C/D/I/O lines as the WD33C93 reports them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -262,7 +105,6 @@ pub struct A2091 {
     /// Counts SCSI commands (for the activity LED).
     pub activity: u64,
     rom: Vec<u8>,
-    pub base: Option<u32>,
     pub disks: [Option<HardDisk>; 7],
 
     // DMAC.
@@ -292,7 +134,6 @@ impl A2091 {
             a3000: false,
             activity: 0,
             rom,
-            base: None,
             disks: Default::default(),
             cntr: 0,
             acr: 0,
@@ -313,18 +154,15 @@ impl A2091 {
     pub fn reset(&mut self) {
         let rom = std::mem::take(&mut self.rom);
         let disks = std::mem::take(&mut self.disks);
-        let (activity, a3000, base) = (self.activity, self.a3000, self.base);
+        let (activity, a3000) = (self.activity, self.a3000);
         *self = A2091::new(rom);
         self.disks = disks;
         self.activity = activity;
         self.a3000 = a3000;
-        if a3000 {
-            self.base = base;
-        }
     }
 
     pub fn new_a3000() -> A2091 {
-        A2091 { a3000: true, base: Some(0xdd_0000), ..A2091::new(vec![]) }
+        A2091 { a3000: true, ..A2091::new(vec![]) }
     }
 
     /// Translate an A3000 SDMAC register offset to the equivalent A2091 DMAC one.
@@ -348,27 +186,6 @@ impl A2091 {
                 0xfe
             }
         }
-    }
-
-    /// Autoconfig ROM contents (not inverted).
-    pub fn autoconfig_regs() -> [u8; 16] {
-        [
-            0xc0 | 0x10 | 0x01, // Zorro II, DiagArea valid, 64 KB
-            0x03,               // A590 / A2091
-            0x00,
-            0x00,
-            0x02, // Commodore (514)
-            0x02,
-            0, 0, 0, 0, // serial number
-            (ROM_OFFSET >> 8) as u8,
-            ROM_OFFSET as u8,
-            0, 0, 0, 0,
-        ]
-    }
-
-    pub fn contains(&self, a: u32) -> Option<u32> {
-        let off = a.wrapping_sub(self.base?);
-        (off < 0x1_0000).then_some(off)
     }
 
     /// Interrupt line to Paula's INT2.

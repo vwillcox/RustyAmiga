@@ -10,6 +10,11 @@
 //! - $DAA000: interrupt enable
 //! - $DE1000: Gayle ID, read one bit at a time in bit 7
 //!
+//! The PCMCIA slot (A600/A1200) takes an SRAM memory card: common memory at
+//! $600000-$9FFFFF, attribute memory (the card's CIS, on even bytes) at
+//! $A00000-$A1FFFF. Card status, change and enable bits sit next to the IDE
+//! bit in $DA8000/$DA9000/$DAA000.
+//!
 //! The A4000 has the same IDE interface without the rest of Gayle:
 //! - $DD2020: data; $DD2022 + 4n: task file register n
 //! - $DD303A: alternate status / device control
@@ -17,6 +22,65 @@
 
 const GAYLE_ID: u8 = 0xd0;
 const IRQ_IDE: u8 = 0x80;
+/// Card status bits: card detect, battery voltage good (BVD1, BVD2), write enable.
+const CS_CCDET: u8 = 0x40;
+const CS_BVD1: u8 = 0x20;
+const CS_BVD2: u8 = 0x10;
+const CS_WR: u8 = 0x08;
+
+/// Where the PCMCIA windows start.
+pub const PCMCIA_COMMON: u32 = 0x60_0000;
+pub const PCMCIA_ATTR: u32 = 0xa0_0000;
+const PCMCIA_END: u32 = 0xa4_0000;
+
+/// An SRAM memory card in the PCMCIA slot.
+pub struct SramCard {
+    pub name: String,
+    pub data: Vec<u8>,
+    pub write_protect: bool,
+    /// Card Information Structure in attribute memory.
+    cis: Vec<u8>,
+}
+
+/// Bytes of attribute memory (even addresses only).
+const ATTR_SIZE: usize = 512;
+
+impl SramCard {
+    /// A card holding `data` (up to 4 MB). Its CIS describes one SRAM device of
+    /// that size; a card that holds an AmigaDOS volume (it starts with "DOS")
+    /// also carries a disk FORMAT tuple, which is what keeps Kickstart from
+    /// adding the card to the free memory list and lets carddisk.device have it.
+    pub fn new(name: String, data: Vec<u8>, write_protect: bool) -> Result<SramCard, String> {
+        let len = data.len();
+        if len == 0 || len > 4 << 20 || len % 512 != 0 {
+            return Err(format!("{name}: a memory card image must be a multiple of 512 bytes, up to 4 MB"));
+        }
+        // Device size: (units - 1) << 3 | unit code, units of 512 bytes << 2 * code.
+        let (code, units) = (0..7u8)
+            .rev()
+            .map(|c| (c, len / (512 << (2 * c))))
+            .find(|&(c, u)| (1..=32).contains(&u) && len % (512 << (2 * c)) == 0)
+            .ok_or_else(|| format!("{name}: card size {len} cannot be described"))?;
+        // CISTPL_DEVICE: SRAM, 100 ns, write-protect switch honoured.
+        let mut cis = vec![0x01, 3, 0x6c, ((units - 1) as u8) << 3 | code, 0xff];
+        if data.starts_with(b"DOS") {
+            let blocks = (len / 512) as u32;
+            // CISTPL_FORMAT: disk-like, no error detection, from offset 0, the
+            // whole card in 512-byte blocks.
+            cis.extend([0x41, 20, 0, 0]);
+            cis.extend(0u32.to_le_bytes());
+            cis.extend((len as u32).to_le_bytes());
+            cis.extend(512u16.to_le_bytes());
+            cis.extend(blocks.to_le_bytes());
+            cis.extend(0u32.to_le_bytes());
+            // CISTPL_GEOMETRY: 32 sectors per track, 1 track per cylinder.
+            cis.extend([0x42, 4, 32, 1]);
+            cis.extend(((blocks / 32) as u16).to_le_bytes());
+        }
+        cis.resize(ATTR_SIZE, 0xff);
+        Ok(SramCard { name, data, write_protect, cis })
+    }
+}
 
 // ATA status bits.
 const BSY: u8 = 0x80;
@@ -103,6 +167,7 @@ pub struct Gayle {
     /// Block of the last read or write command, until the drive sounds collect it.
     pub pending_seek: Option<u32>,
     pub drives: [Option<AtaDrive>; 2],
+    pub card: Option<SramCard>,
     id_pos: u8,
     irq_latch: u8,
     int_enable: u8,
@@ -134,6 +199,7 @@ impl Gayle {
             activity: 0,
             pending_seek: None,
             drives: [None, None],
+            card: None,
             id_pos: 0,
             irq_latch: 0,
             int_enable: 0,
@@ -160,9 +226,15 @@ impl Gayle {
 
     pub fn reset(&mut self) {
         let drives = std::mem::take(&mut self.drives);
+        let card = self.card.take();
         let (a4000, activity) = (self.a4000, self.activity);
         *self = Gayle::new();
         self.drives = drives;
+        // A card in the slot at power-on counts as just inserted.
+        if card.is_some() {
+            self.irq_latch |= CS_CCDET;
+        }
+        self.card = card;
         self.a4000 = a4000;
         self.activity = activity;
     }
@@ -173,6 +245,61 @@ impl Gayle {
             return self.intrq;
         }
         self.irq_latch & self.int_enable & IRQ_IDE != 0
+    }
+
+    /// Interrupt line to INT6 (EXTER): a card was inserted or removed.
+    pub fn irq6(&self) -> bool {
+        !self.a4000 && self.irq_latch & self.int_enable & CS_CCDET != 0
+    }
+
+    fn card_status(&self) -> u8 {
+        let mut v = if self.intrq { IRQ_IDE } else { 0 };
+        if let Some(c) = &self.card {
+            v |= CS_CCDET | CS_BVD1 | CS_BVD2 | if c.write_protect { 0 } else { CS_WR };
+        }
+        v
+    }
+
+    /// Put a card in the slot (the status change shows in the latch).
+    pub fn insert_card(&mut self, card: SramCard) {
+        self.card = Some(card);
+        self.irq_latch |= CS_CCDET;
+    }
+
+    /// The PCMCIA windows, when a card is in the slot.
+    pub fn card_present(&self) -> bool {
+        self.card.is_some()
+    }
+
+    pub fn card_read8(&self, a: u32) -> u8 {
+        let v = self.card_byte(a);
+        log::trace!("pcmcia: read {a:06x} = {v:02x}");
+        v
+    }
+
+    fn card_byte(&self, a: u32) -> u8 {
+        let Some(c) = &self.card else { return 0xff };
+        let a = a & 0xff_ffff;
+        match a {
+            PCMCIA_COMMON..PCMCIA_ATTR => c.data.get((a - PCMCIA_COMMON) as usize).copied().unwrap_or(0xff),
+            // Attribute memory: CIS byte n at even address 2n, then empty.
+            PCMCIA_ATTR..PCMCIA_END if a & 1 == 0 => c.cis.get(((a - PCMCIA_ATTR) / 2) as usize).copied().unwrap_or(0xff),
+            _ => 0xff,
+        }
+    }
+
+    pub fn card_write8(&mut self, a: u32, v: u8) {
+        log::trace!("pcmcia: write {a:06x} = {v:02x}");
+        let Some(c) = self.card.as_mut().filter(|c| !c.write_protect) else { return };
+        let a = a & 0xff_ffff;
+        let b = match a {
+            PCMCIA_COMMON..PCMCIA_ATTR => c.data.get_mut((a - PCMCIA_COMMON) as usize),
+            PCMCIA_ATTR..PCMCIA_END if a & 1 == 0 => c.cis.get_mut(((a - PCMCIA_ATTR) / 2) as usize),
+            _ => None,
+        };
+        if let Some(b) = b {
+            *b = v;
+        }
     }
 
     /// A4000 decode: Some(Ok(reg)) for a task file register, Some(Err(())) for
@@ -219,13 +346,7 @@ impl Gayle {
         }
         match a >> 16 & 0xff {
             0xda => match a & 0xf000 {
-                0x8000 => {
-                    if self.intrq {
-                        IRQ_IDE
-                    } else {
-                        0
-                    }
-                }
+                0x8000 => self.card_status(),
                 0x9000 => self.irq_latch,
                 0xa000 => self.int_enable,
                 0xb000 => self.cfg,
@@ -261,6 +382,9 @@ impl Gayle {
                 None => {}
             }
             return;
+        }
+        if a & 0xff_c000 == 0xda_8000 {
+            log::trace!("gayle: write {a:06x} = {v:02x}");
         }
         match a >> 16 & 0xff {
             0xda => match a & 0xf000 {
