@@ -93,6 +93,10 @@ struct Args {
     /// `^X` is Ctrl+X, `\AX` is Left Amiga+X, `\n` is Return. May be given several times.
     #[arg(long = "type")]
     type_keys: Vec<String>,
+    /// Headless: hold joystick buttons for 10 frames, e.g. "1200:fire" or
+    /// "900:right"; names are up, down, left, right, fire, fire2 (joined by +).
+    #[arg(long = "joy")]
+    joy_presses: Vec<String>,
     /// Headless: record audio output to a 16-bit stereo WAV file.
     #[arg(long)]
     wav: Option<PathBuf>,
@@ -106,8 +110,9 @@ struct Args {
     /// order. Writes stay in memory and are not saved back.
     #[arg(long = "hdf")]
     hdf: Vec<PathBuf>,
-    /// CD-ROM image (ISO 9660) in a SCSI CD-ROM drive, at the first free SCSI ID
-    /// after the hard disks.
+    /// CD-ROM image: the CD32's own drive (ISO, or CUE/BIN with audio tracks);
+    /// elsewhere an ISO in a SCSI CD-ROM drive at the first free SCSI ID after
+    /// the hard disks, or on a machine with IDE and no SCSI an ATAPI drive.
     #[arg(long = "cd")]
     cd: Option<PathBuf>,
     /// SRAM memory card for the A600/A1200 PCMCIA slot: an image (up to 4 MB),
@@ -524,10 +529,12 @@ fn main() {
     }
     // The A3000's own SCSI controller is already fitted; elsewhere the disks and
     // the CD-ROM drive go on an A590/A2091 (added unless --board chose one).
+    // Without SCSI, an IDE port takes the CD-ROM drive as an ATAPI device.
     let has_scsi = amiga.board.scsi.is_some()
         || amiga.board.exp.cards.iter().any(|c| matches!(c.dev, amiga::expansion::Device::A2091))
         || amiga.board.controllers().any(|d| d.disks().is_some());
-    if !hdfs.is_empty() || (args.cd.is_some() && !has_scsi) {
+    let atapi_cd = !has_scsi && amiga.board.gayle.is_some();
+    if !hdfs.is_empty() || (args.cd.is_some() && !has_scsi && !atapi_cd && amiga.board.akiko.is_none()) {
         if hdfs.len() > 7 {
             die("at most 7 hard disks are supported");
         }
@@ -569,21 +576,34 @@ fn main() {
         log::info!("PCMCIA: {} ({} KB SRAM card)", card.name, card.data.len() / 1024);
         g.insert_card(card);
     }
-    if let Some(p) = &args.cd {
-        let drive = amiga::scsi::HardDisk::cdrom(p).unwrap_or_else(|e| die(format!("{}: {e}", p.display())));
-        // The same controller as the hard disks; ID 7 is the controller's own.
-        let units: &mut [Option<amiga::scsi::HardDisk>] = if amiga.board.controllers().any(|d| d.disks().is_some()) {
-            amiga.board.controllers().find_map(|d| d.disks()).map(|v| &mut v[..7]).unwrap()
+    if let (Some(p), Some(akiko)) = (&args.cd, amiga.board.akiko.as_mut()) {
+        // The CD32's own drive, behind Akiko.
+        let disc = amiga::cdimage::Disc::open(p).unwrap_or_else(|e| die(e));
+        log::info!("CD32 drive: {} ({} tracks, {} MB)", p.display(), disc.tracks.len(), disc.leadout as u64 * 2048 >> 20);
+        akiko.cd.disc = Some(disc);
+        akiko.cd.reset();
+    } else if let Some(p) = &args.cd {
+        let drive = amiga::scsi::HardDisk::cdrom(p).unwrap_or_else(|e| die(e));
+        if atapi_cd {
+            let g = amiga.board.gayle.as_mut().unwrap();
+            let Some(i) = g.drives.iter().position(|d| d.is_none()) else { die("no free IDE position for the CD-ROM drive") };
+            log::info!("IDE {}: ATAPI CD-ROM {} ({} MB)", if i == 0 { "master" } else { "slave" }, p.display(), drive.blocks() / 512);
+            g.drives[i] = Some(amiga::gayle::AtaDrive::cdrom(drive));
         } else {
-            &mut amiga.board.scsi.as_mut().unwrap().disks
-        };
-        let Some(i) = units.iter().position(|u| u.is_none()) else { die("no free SCSI ID for the CD-ROM drive") };
-        log::info!("SCSI unit {i}: CD-ROM {} ({} MB)", p.display(), drive.blocks() / 512);
-        units[i] = Some(drive);
+            // The same controller as the hard disks; ID 7 is the controller's own.
+            let units: &mut [Option<amiga::scsi::HardDisk>] = if amiga.board.controllers().any(|d| d.disks().is_some()) {
+                amiga.board.controllers().find_map(|d| d.disks()).map(|v| &mut v[..7]).unwrap()
+            } else {
+                &mut amiga.board.scsi.as_mut().unwrap().disks
+            };
+            let Some(i) = units.iter().position(|u| u.is_none()) else { die("no free SCSI ID for the CD-ROM drive") };
+            log::info!("SCSI unit {i}: CD-ROM {} ({} MB)", p.display(), drive.blocks() / 512);
+            units[i] = Some(drive);
+        }
     }
     amiga.board.audio.stereo_separation = args.stereo_separation.clamp(0.0, 1.0);
     amiga.board.audio.mech.enabled = !args.no_drive_sounds;
-    let has_hd = amiga.board.gayle.as_ref().is_some_and(|g| g.drives.iter().any(|d| d.is_some()))
+    let has_hd = amiga.board.gayle.as_ref().is_some_and(|g| g.drives.iter().flatten().any(|d| d.cd.is_none()))
         || amiga.board.scsi.as_ref().is_some_and(|s| s.disks.iter().any(|d| d.is_some()))
         || amiga.board.controllers().any(|d| d.disks().is_some_and(|v| v.iter().any(|d| d.is_some())));
     amiga.board.audio.mech.set_hard_disk(has_hd);
@@ -649,6 +669,19 @@ fn main() {
                 (f.parse().unwrap_or_else(|_| die("bad frame in --type")), amiga::keyboard::text_to_keys(text))
             })
             .collect();
+        let joy_presses: Vec<(u64, [bool; 6])> = args
+            .joy_presses
+            .iter()
+            .map(|t| {
+                let (f, names) = t.split_once(':').unwrap_or_else(|| die("--joy expects FRAME:BUTTONS"));
+                let mut b = [false; 6];
+                for n in names.split('+') {
+                    let i = ["up", "down", "left", "right", "fire", "fire2"].iter().position(|&x| x == n);
+                    b[i.unwrap_or_else(|| die(format!("unknown joystick button '{n}'")))] = true;
+                }
+                (f.parse().unwrap_or_else(|_| die("bad frame in --joy")), b)
+            })
+            .collect();
         let (mut hd_seen, mut hd_changed) = (0u64, 0u64);
         for f in 1..=args.frames {
             amiga.run_frame();
@@ -677,6 +710,7 @@ fn main() {
                 }
                 !keys.is_empty()
             });
+            amiga.board.joy = joy_presses.iter().find(|(at, _)| (*at..*at + 10).contains(&f)).map_or([false; 6], |p| p.1);
             if let (Some(n), Some(p)) = (args.shot_every, &args.screenshot) {
                 if f % n == 0 {
                     let stem = p.with_extension("");

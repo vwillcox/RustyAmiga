@@ -116,6 +116,10 @@ pub struct Audio {
     hp_rate: OnePole,
     /// Floppy and hard disk noises, mixed in after the analog stage.
     pub mech: crate::drivesound::DriveSounds,
+    /// CD audio (44.1 kHz stereo) waiting to be mixed, and the position
+    /// between its first two frames.
+    pub cd: std::collections::VecDeque<(i16, i16)>,
+    cd_phase: f64,
 }
 
 /// Something that can serve audio DMA fetches.
@@ -146,6 +150,8 @@ impl Audio {
             stage: [stage; 2],
             hp_rate: OnePole::lowpass(5.2, 48000.0),
             mech: crate::drivesound::DriveSounds::new(48000),
+            cd: Default::default(),
+            cd_phase: 0.0,
         }
     }
 
@@ -163,6 +169,25 @@ impl Audio {
         for c in self.ch.iter_mut() {
             *c = Channel::default();
         }
+        self.cd.clear();
+    }
+
+    /// The next CD audio output sample, resampled from 44.1 kHz by linear
+    /// interpolation (silence when nothing is playing).
+    fn cd_sample(&mut self) -> (f32, f32) {
+        if self.cd.len() < 2 {
+            return (0.0, 0.0);
+        }
+        let (a, b) = (self.cd[0], self.cd[1]);
+        let t = self.cd_phase as f32;
+        let mix = |x: i16, y: i16| (x as f32 + (y as f32 - x as f32) * t) / 32768.0 * 0.5;
+        let out = (mix(a.0, b.0), mix(a.1, b.1));
+        self.cd_phase += 44100.0 / self.sample_rate as f64;
+        while self.cd_phase >= 1.0 && self.cd.len() >= 2 {
+            self.cd_phase -= 1.0;
+            self.cd.pop_front();
+        }
+        out
     }
 
     /// CPU write to AUDxDAT.
@@ -309,9 +334,10 @@ impl Audio {
             let sep = self.stereo_separation as f64;
             let (l, r) = (l * (0.5 + sep / 2.0) + r * (0.5 - sep / 2.0), r * (0.5 + sep / 2.0) + l * (0.5 - sep / 2.0));
             let m = self.mech.sample();
+            let (cl, cr) = self.cd_sample();
             if self.out.len() < 96000 {
-                self.out.push(l as f32 + m);
-                self.out.push(r as f32 + m);
+                self.out.push(l as f32 + m + cl);
+                self.out.push(r as f32 + m + cr);
             }
         }
         irq

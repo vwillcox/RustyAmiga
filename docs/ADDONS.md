@@ -32,7 +32,8 @@ ROM dumps, and on the Amiga hardware databases (amiga.resource.cx, Big Book of A
   clocks (MSM6242B, RF5C01A). Motherboard RAM (A3000/A4000) and slow RAM.
 - A590/A2091 SCSI (DMAC + WD33C93, Commodore boot ROM), A3000 SDMAC SCSI, Gayle IDE (A600/A1200), A4000 IDE.
 - NCR 53C710 with its SCRIPTS processor: the A4091 (Commodore boot ROM) and the A4000T's built-in SCSI.
-- SCSI CD-ROM drives with ISO images, on every SCSI controller.
+- CD-ROM drives with ISO images: SCSI on every SCSI controller, ATAPI on the A600/A1200/A4000 IDE port.
+- PCMCIA SRAM cards on the A600/A1200 (as Fast RAM, or mounted as `CC0:`).
 - CD32 Akiko (ID, C2P, NVRAM) without a CD drive.
 - Host folders as FFS volumes (instead of UAE's host filesystem board).
 - CPUs 68000/68020/68030/68040 (no MMU translation, no 68060), FPU 68881/68882/68040.
@@ -70,7 +71,7 @@ a description: bus, autoconfig IDs, register offsets, ROM, interrupt line and qu
 | NCR 5380 and other simple controllers | Supra, Trumpcard/Grand Slam, Nexus, HardFrame, StarDrive, FastTrak, Kommos, Malibu, Kronos, Golem SCSI II, Evesham Reference, AdSCSI, Apollo, DataFlyer, Emplant, IVS Vector, Twelve Gauge, Fireball, InMate, Phoenix, AddHard, Overdrive, ALF1/2, SCRAM (DP8490), Paradox (parallel port) | New core (very simple, CPU-driven); about 40 boards on top of it |
 | Early SASI/MFM | Xebec 9720H, Tecmar, OMTI, Combitec HD20A | Small custom cores over the SASI protocol |
 | IDE/ATA ✓ | Gayle ✓, A4000 ✓, Buddha/Catweasel IDE, AlfaPower/AT-Bus 2008, Elbox FastATA, AccessX, Arriba, AdIDE, Tandem, A-Team, RIPPLE, AIDE, Trumpcard 500AT, Golem IDE, Dotto, X-Surf IDE | Core done; each board is a register-map description + ROM |
-| ATAPI CD-ROM, SCSI CD-ROM ✓ (SCSI) | CD-ROM drives on any of the above, A570/CDTV drive | ATAPI/SCSI MMC packet commands over an ISO/CUE image; shared with the CD32 drive work |
+| ATAPI CD-ROM ✓ (Gayle, A4000), SCSI CD-ROM ✓ | CD-ROM drives on any of the above, A570/CDTV drive | ATAPI/SCSI MMC packet commands over an ISO/CUE image; shared with the CD32 drive work |
 | SCSI tape | A3070 (QIC-150), DAT drives | SCSI sequential-access device backed by a file; with the drive noises, a working tape drive |
 | Floppy | A1010/A1011/A1020 (5.25" 40-track), A2010, HD drives ✓, Catweasel (PC/C64/Mac formats) | Drive geometry options; Catweasel as its own controller with raw disk images |
 

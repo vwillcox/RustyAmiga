@@ -1,6 +1,8 @@
 pub mod a2091;
 pub mod a4091;
 pub mod akiko;
+pub mod akiko_cd;
+pub mod cdimage;
 pub mod board;
 pub mod bus;
 pub mod chipset;

@@ -31,7 +31,7 @@ pub struct Machine {
     /// Hard disk images (HDF), in unit order.
     #[serde(default)]
     pub hard_disks: Vec<PathBuf>,
-    /// CD-ROM image (ISO 9660) in a SCSI CD-ROM drive.
+    /// CD image (ISO or CUE/BIN): the CD32 drive, a SCSI drive, or ATAPI on an IDE-only machine.
     #[serde(default)]
     pub cd: Option<PathBuf>,
 }
@@ -664,7 +664,7 @@ impl App {
             let text = m.cd.as_ref().and_then(|p| p.file_name()).map(|f| f.to_string_lossy().to_string()).unwrap_or("(empty)".into());
             ui.add_sized([360.0, 20.0], egui::Label::new(text).truncate());
             if ui.button("Insert…").clicked() {
-                if let Some(p) = rfd::FileDialog::new().add_filter("CD image", &["iso"]).pick_file() {
+                if let Some(p) = rfd::FileDialog::new().add_filter("CD image", &["iso", "cue"]).pick_file() {
                     m.cd = Some(p);
                 }
             }
@@ -672,7 +672,7 @@ impl App {
                 m.cd = None;
             }
         });
-        ui.label(egui::RichText::new("Hard disks go on the SCSI board chosen above, else the machine's own controller; the CD-ROM drive is SCSI.").weak());
+        ui.label(egui::RichText::new("Hard disks go on the SCSI board chosen above, else the machine's own controller; the CD-ROM drive joins them (on the A600/A1200/A4000 IDE port it is ATAPI, which needs a Kickstart 3.X scsi.device). A CD32 uses its own drive.").weak());
     }
 
     fn machine_tab(&mut self, ui: &mut egui::Ui) {

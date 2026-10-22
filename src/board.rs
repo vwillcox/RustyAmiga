@@ -404,6 +404,9 @@ impl Board {
         if let Some(g) = self.gayle.as_mut() {
             g.reset();
         }
+        if let Some(a) = self.akiko.as_mut() {
+            a.cd.reset();
+        }
     }
 
     // ---- time -------------------------------------------------------------
@@ -603,6 +606,7 @@ impl Board {
             }
         }
         self.scsi_tick();
+        self.akiko_tick();
         self.update_cia_irq();
         self.update_drive_sounds();
         self.start_line();
@@ -960,6 +964,7 @@ impl Board {
             || self.gayle.as_ref().is_some_and(|g| g.irq())
             || self.exp.cards.iter().any(|c| matches!(&c.dev, Device::Io(d) if d.irq()))
             || self.builtin.as_ref().is_some_and(|d| d.irq())
+            || self.akiko.as_ref().is_some_and(|a| a.cd.irq())
         {
             self.intreq |= int::PORTS;
         }
@@ -993,7 +998,14 @@ impl Board {
             self.cia_a.write(reg, v as u8);
             if reg == 0 || reg == 2 {
                 let pa = self.cia_a.pa_out();
-                self.overlay = pa & 1 != 0;
+                if let Some(a) = self.akiko.as_mut() {
+                    // The CD32 has no overlay bit: PA0 mutes CD audio (low =
+                    // muted), and the boot ROM's first write clears the overlay.
+                    a.cd.muted = pa & 1 == 0;
+                    self.overlay &= pa & 1 != 0;
+                } else {
+                    self.overlay = pa & 1 != 0;
+                }
                 self.audio.filter_on = pa & 2 == 0;
             }
             if reg == 14 {
@@ -1404,6 +1416,17 @@ impl Board {
             self.builtin = Some(d);
         }
         self.update_cia_irq();
+    }
+
+    /// The CD32's CD drive: one scan line of its DMA and command processing.
+    fn akiko_tick(&mut self) {
+        let Some(mut a) = self.akiko.take() else { return };
+        a.cd.tick_line(&mut DmaPort(self));
+        // CD audio joins the mix (44.1 kHz from the disc).
+        if !a.cd.samples.is_empty() {
+            self.audio.cd.extend(a.cd.samples.drain(..));
+        }
+        self.akiko = Some(a);
     }
 
     fn dma_poke(&mut self, a: u32, v: u8) {

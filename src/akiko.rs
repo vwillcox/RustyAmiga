@@ -1,11 +1,10 @@
 //! Akiko, the CD32's custom chip at $B80000: the chip ID, the chunky-to-planar
-//! converter, the I2C lines of the settings NVRAM, and the CD-ROM controller.
+//! converter, the I2C lines of the settings NVRAM, and the CD-ROM controller
+//! (`akiko_cd`).
 //!
-//! No CD drive is emulated yet: its registers read as idle, so the CD32 boots
-//! to its "insert a disc" screen.
-//!
-//! Registers (byte offsets from $B80000):
-//! - $02-$05: ID, $C0CACAFE
+//! Registers (byte offsets from $B80000, mirrored every 64 bytes):
+//! - $00-$03: ID, $C0CACAFE (graphics.library looks for $CAFE at $B80002)
+//! - $04-$2B: CD-ROM controller
 //! - $30-$33: NVRAM I2C port (direction at $32, data at $33: bit 7 = SCL, bit 6 = SDA)
 //! - $38-$3B: C2P. Write eight longs of chunky pixels (four pixels per long),
 //!   then read back eight longs: one 32-pixel row of each of the eight planes.
@@ -28,6 +27,7 @@ enum I2c {
 }
 
 pub struct Akiko {
+    pub cd: crate::akiko_cd::CdDrive,
     c2p_in: [u32; 8],
     c2p_out: [u32; 8],
     write_idx: usize,
@@ -56,6 +56,7 @@ impl Default for Akiko {
 impl Akiko {
     pub fn new() -> Self {
         Akiko {
+            cd: Default::default(),
             c2p_in: [0; 8],
             c2p_out: [0; 8],
             write_idx: 0,
@@ -74,11 +75,12 @@ impl Akiko {
     }
 
     pub fn read8(&mut self, off: u32) -> u8 {
-        match off & 0xff {
-            0x02 => 0xc0,
-            0x03 => 0xca,
-            0x04 => 0xca,
-            0x05 => 0xfe,
+        let off = off & 0x3f;
+        match off {
+            0x00 => 0xc0,
+            0x01 | 0x02 => 0xca,
+            0x03 => 0xfe,
+            0x04..=0x2b => self.cd.read8(off),
             0x32 => self.io_dir,
             0x33 => {
                 // Lines set as outputs read back what the CPU drives; SDA as an
@@ -92,7 +94,9 @@ impl Akiko {
     }
 
     pub fn write8(&mut self, off: u32, v: u8) {
-        match off & 0xff {
+        let off = off & 0x3f;
+        match off {
+            0x04..=0x2b => self.cd.write8(off, v),
             0x32 => {
                 self.io_dir = v;
                 self.update_lines();
@@ -268,7 +272,7 @@ mod tests {
     #[test]
     fn id() {
         let mut a = Akiko::new();
-        let id = (2..6).fold(0u32, |v, o| v << 8 | a.read8(o) as u32);
+        let id = (0..4).fold(0u32, |v, o| v << 8 | a.read8(o) as u32);
         assert_eq!(id, 0xc0ca_cafe);
     }
 }

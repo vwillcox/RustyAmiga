@@ -22,9 +22,9 @@ pub enum Kind {
 pub struct HardDisk {
     pub name: String,
     pub kind: Kind,
-    /// Disk contents. Writes stay here; a disc image is read from `file` instead.
+    /// Disk contents. Writes stay here; a CD is read from `disc` instead.
     pub data: Vec<u8>,
-    file: Option<(std::fs::File, u64)>,
+    disc: Option<crate::cdimage::Disc>,
     pub read_only: bool,
     /// Sense key / additional sense code for REQUEST SENSE.
     pub(crate) sense: (u8, u8),
@@ -34,15 +34,14 @@ pub struct HardDisk {
 
 impl HardDisk {
     pub fn new(name: String, data: Vec<u8>, read_only: bool) -> HardDisk {
-        HardDisk { name, kind: Kind::Disk, data, file: None, read_only, sense: (0, 0), pending_seek: None }
+        HardDisk { name, kind: Kind::Disk, data, disc: None, read_only, sense: (0, 0), pending_seek: None }
     }
 
-    /// A CD-ROM drive with an ISO 9660 image (raw 2048-byte sectors) inserted.
-    pub fn cdrom(path: &std::path::Path) -> std::io::Result<HardDisk> {
-        let file = std::fs::File::open(path)?;
-        let len = file.metadata()?.len();
-        let name = path.display().to_string();
-        Ok(HardDisk { name, kind: Kind::CdRom, data: vec![], file: Some((file, len)), read_only: true, sense: (0, 0), pending_seek: None })
+    /// A CD-ROM drive with a disc inserted (an ISO, or a CUE sheet whose first
+    /// track is data).
+    pub fn cdrom(path: &std::path::Path) -> Result<HardDisk, String> {
+        let disc = crate::cdimage::Disc::open(path)?;
+        Ok(HardDisk { name: disc.name.clone(), kind: Kind::CdRom, data: vec![], disc: Some(disc), read_only: true, sense: (0, 0), pending_seek: None })
     }
 
     fn block_size(&self) -> usize {
@@ -53,8 +52,11 @@ impl HardDisk {
     }
 
     pub fn blocks(&self) -> u32 {
-        let len = self.file.as_ref().map_or(self.data.len() as u64, |f| f.1);
-        (len / self.block_size() as u64) as u32
+        match &self.disc {
+            // The data track (an ISO has nothing else).
+            Some(d) => d.tracks.first().filter(|t| !t.audio).map_or(0, |t| t.len),
+            None => (self.data.len() / self.block_size()) as u32,
+        }
     }
 
     /// Blocks `lba..lba + n`, or None past the end.
@@ -64,12 +66,12 @@ impl HardDisk {
         }
         let bs = self.block_size();
         let (a, len) = (lba as usize * bs, n as usize * bs);
-        match self.file.as_mut() {
-            Some((f, _)) => {
-                use std::io::{Read, Seek, SeekFrom};
-                let mut buf = vec![0u8; len];
-                f.seek(SeekFrom::Start(a as u64)).ok()?;
-                f.read_exact(&mut buf).ok()?;
+        match self.disc.as_mut() {
+            Some(d) => {
+                let mut buf = Vec::with_capacity(len);
+                for b in lba..lba + n {
+                    buf.extend(d.read_data(b)?);
+                }
                 Some(buf)
             }
             None => Some(self.data[a..a + len].to_vec()),
@@ -104,7 +106,7 @@ impl HardDisk {
         let cd = self.kind == Kind::CdRom;
         let bs = self.block_size() as u32;
         match cdb[0] {
-            0x00 | 0x1b | 0x1e | 0x15 | 0x04 | 0x2f | 0x35 => ok(self),
+            0x00 | 0x1b | 0x1e | 0x15 | 0x55 | 0x04 | 0x2f | 0x35 => ok(self),
             0x03 => {
                 let mut s = vec![0u8; 18];
                 s[0] = 0x70;
@@ -165,6 +167,21 @@ impl HardDisk {
                 d[0] = (d.len() - 1) as u8;
                 d.truncate(cdb[4] as usize);
                 out.extend(d);
+                ok(self)
+            }
+            // MODE SENSE(10), which ATAPI drivers use: the 6-byte answer with
+            // the longer header.
+            0x5a => {
+                let mut d = vec![];
+                let status = self.execute(&[0x1a, cdb[1], cdb[2], 0, 255, 0], &[], &mut d);
+                if status != GOOD {
+                    return status;
+                }
+                let n = (d.len() + 3) as u16;
+                let mut h = vec![(n >> 8) as u8, n as u8, d[1], d[2], 0, 0, 0, d[3]];
+                h.extend(&d[4..]);
+                h.truncate(alloc10());
+                out.extend(h);
                 ok(self)
             }
             0x08 | 0x28 | 0xa8 => {
@@ -247,6 +264,7 @@ impl HardDisk {
             0x0a => (if cdb[4] == 0 { 256 } else { cdb[4] as usize }) * 512,
             0x2a => ((cdb[7] as usize) << 8 | cdb[8] as usize) * 512,
             0x15 => cdb[4] as usize,
+            0x55 => (cdb[7] as usize) << 8 | cdb[8] as usize,
             _ => 0,
         }
     }

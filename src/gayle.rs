@@ -93,6 +93,14 @@ const ERR: u8 = 0x01;
 const ABRT: u8 = 0x04;
 const IDNF: u8 = 0x10;
 
+/// An IDENTIFY string: `len` words, space-padded, two characters per word.
+fn ata_text(w: &mut [u16; 256], at: usize, len: usize, s: &str) {
+    let b: Vec<u8> = s.bytes().chain(std::iter::repeat(b' ')).take(len * 2).collect();
+    for i in 0..len {
+        w[at + i] = (b[i * 2] as u16) << 8 | b[i * 2 + 1] as u16;
+    }
+}
+
 /// An HDF image attached as an ATA drive.
 pub struct AtaDrive {
     pub name: String,
@@ -102,6 +110,9 @@ pub struct AtaDrive {
     secs: u32,
     /// Sectors per interrupt for READ/WRITE MULTIPLE.
     multiple: u32,
+    /// An ATAPI CD-ROM drive instead of a disk: packet commands carry SCSI
+    /// commands to it.
+    pub cd: Option<crate::scsi::HardDisk>,
 }
 
 impl AtaDrive {
@@ -109,7 +120,12 @@ impl AtaDrive {
         let blocks = (data.len() / 512) as u32;
         let (heads, secs) = (16, 63);
         let cyls = blocks.div_ceil(heads * secs).clamp(1, 65535);
-        AtaDrive { name, data, cyls, heads, secs, multiple: 1 }
+        AtaDrive { name, data, cyls, heads, secs, multiple: 1, cd: None }
+    }
+
+    /// An ATAPI CD-ROM drive holding `disc`.
+    pub fn cdrom(disc: crate::scsi::HardDisk) -> AtaDrive {
+        AtaDrive { name: disc.name.clone(), data: vec![], cyls: 0, heads: 0, secs: 0, multiple: 1, cd: Some(disc) }
     }
 
     fn blocks(&self) -> u32 {
@@ -122,15 +138,9 @@ impl AtaDrive {
         w[1] = self.cyls as u16;
         w[3] = self.heads as u16;
         w[6] = self.secs as u16;
-        let text = |w: &mut [u16; 256], at: usize, len: usize, s: &str| {
-            let b: Vec<u8> = s.bytes().chain(std::iter::repeat(b' ')).take(len * 2).collect();
-            for i in 0..len {
-                w[at + i] = (b[i * 2] as u16) << 8 | b[i * 2 + 1] as u16;
-            }
-        };
-        text(&mut w, 10, 10, "00000001");
-        text(&mut w, 23, 4, "1.0");
-        text(&mut w, 27, 20, "AMIGA HARDFILE");
+        ata_text(&mut w, 10, 10, "00000001");
+        ata_text(&mut w, 23, 4, "1.0");
+        ata_text(&mut w, 27, 20, "AMIGA HARDFILE");
         w[47] = 0x8010; // up to 16 sectors per READ/WRITE MULTIPLE
         w[49] = 0x0200; // LBA supported
         w[53] = 1;
@@ -149,6 +159,21 @@ impl AtaDrive {
         // scsi.device swaps IDENTIFY data back.
         w.iter().flat_map(|v| v.to_le_bytes()).collect()
     }
+
+    /// IDENTIFY PACKET DEVICE data for the CD-ROM drive.
+    fn identify_packet(&self) -> Vec<u8> {
+        let mut w = [0u16; 256];
+        // ATAPI, CD-ROM, removable, DRQ within 3 ms of PACKET, 12-byte packets.
+        w[0] = 0x8580;
+        ata_text(&mut w, 10, 10, "00000001");
+        ata_text(&mut w, 23, 4, "1.0");
+        ata_text(&mut w, 27, 20, "AMIGA CD-ROM");
+        w[49] = 0x0200; // LBA (no DMA)
+        w[53] = 2;
+        w[64] = 3; // PIO modes 3 and 4
+        w[80] = 0x001e; // ATA/ATAPI-1 to 4
+        w.iter().flat_map(|v| v.to_le_bytes()).collect()
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -157,7 +182,17 @@ enum Xfer {
     /// Host reads `count` more sectors; `per_irq` sectors between interrupts.
     Read { count: u32, per_irq: u32 },
     Write { count: u32, per_irq: u32 },
+    /// The host sends a 12-byte ATAPI command packet.
+    Packet,
+    /// The host reads ATAPI data, one byte-count-limited chunk at a time.
+    PacketIn,
+    /// The host sends `len` bytes of ATAPI data for the packet.
+    PacketOut { cdb: [u8; 12] },
 }
+
+// ATAPI interrupt reason (sector count register) bits.
+const COD: u8 = 1;
+const IO: u8 = 2;
 
 pub struct Gayle {
     /// A4000 IDE (no Gayle registers, different address decode).
@@ -190,6 +225,10 @@ pub struct Gayle {
     xfer: Xfer,
     /// LBA of the next sector to transfer.
     lba: u32,
+    /// ATAPI data still to go to the host after the current chunk.
+    pkt: Vec<u8>,
+    /// ATAPI byte count limit: the largest chunk per DRQ.
+    pkt_limit: usize,
 }
 
 impl Gayle {
@@ -217,6 +256,8 @@ impl Gayle {
             pos: 0,
             xfer: Xfer::None,
             lba: 0,
+            pkt: vec![],
+            pkt_limit: 0,
         }
     }
 
@@ -471,6 +512,7 @@ impl Gayle {
             self.sector = 1;
             self.cyl = 0;
             self.select = 0xa0;
+            self.signature();
         }
         self.devctl = v;
     }
@@ -491,7 +533,7 @@ impl Gayle {
 
     /// Write the LBA back into the task file (it reflects the last sector moved).
     fn set_address(&mut self, lba: u32) {
-        let Some(d) = self.drive() else { return };
+        let Some(d) = self.drive().filter(|d| d.cd.is_none()) else { return };
         if self.select & 0x40 != 0 {
             self.sector = lba as u8;
             self.cyl = (lba >> 8) as u16;
@@ -502,6 +544,16 @@ impl Gayle {
             let t = lba / secs;
             self.select = (self.select & 0xf0) | (t % heads) as u8;
             self.cyl = (t / heads) as u16;
+        }
+    }
+
+    /// After a reset or a disk command, an ATAPI device identifies itself
+    /// with $EB14 in the cylinder registers.
+    fn signature(&mut self) {
+        if self.drive().is_some_and(|d| d.cd.is_some()) {
+            self.nsect = 1;
+            self.sector = 1;
+            self.cyl = 0xeb14;
         }
     }
 
@@ -518,6 +570,9 @@ impl Gayle {
         }
         self.activity += 1;
         self.error = 0;
+        if self.drive().is_some_and(|d| d.cd.is_some()) {
+            return self.atapi_command(cmd);
+        }
         let count = if self.nsect == 0 { 256 } else { self.nsect as u32 };
         match cmd {
             0xec => {
@@ -588,6 +643,97 @@ impl Gayle {
         }
     }
 
+    /// Commands to an ATAPI device: the packet protocol, plus the few ATA
+    /// commands it answers. The rest abort with the ATAPI signature, which is
+    /// how drivers tell the two kinds of device apart.
+    fn atapi_command(&mut self, cmd: u8) {
+        match cmd {
+            0xa1 => {
+                self.buf = self.drive().unwrap().identify_packet();
+                self.pos = 0;
+                self.xfer = Xfer::Read { count: 1, per_irq: 1 };
+                self.lba = 0;
+                self.status = DRDY | DSC | DRQ;
+                self.raise();
+            }
+            0xa0 => {
+                // The byte count limit; 0 is taken as the maximum, and the
+                // limit is even.
+                let limit = self.cyl as usize & !1;
+                self.pkt_limit = if limit == 0 { 0xfffe } else { limit };
+                self.buf = vec![0; 12];
+                self.pos = 0;
+                self.xfer = Xfer::Packet;
+                self.nsect = COD;
+                self.status = DRDY | DSC | DRQ;
+            }
+            0x08 | 0x90 => {
+                // DEVICE RESET, EXECUTE DEVICE DIAGNOSTIC
+                self.xfer = Xfer::None;
+                self.error = 1;
+                self.status = DRDY | DSC;
+                self.signature();
+                if cmd == 0x90 {
+                    self.raise();
+                }
+            }
+            0xef | 0xe0..=0xe7 | 0x94..=0x99 => {
+                self.status = DRDY | DSC;
+                self.raise();
+            }
+            _ => {
+                self.signature();
+                self.abort();
+            }
+        }
+    }
+
+    /// Run the received packet (with its data out, if any).
+    fn run_packet(&mut self, cdb: [u8; 12], data_out: &[u8]) {
+        let unit = self.unit();
+        let disc = self.drives[unit].as_mut().unwrap().cd.as_mut().unwrap();
+        let mut out = vec![];
+        let status = disc.execute(&cdb, data_out, &mut out);
+        log::debug!("atapi: packet {:02x?} -> {status:02x}, {} bytes", &cdb[..10], out.len());
+        if status != crate::scsi::GOOD {
+            self.xfer = Xfer::None;
+            self.error = disc.sense.0 << 4 | ABRT;
+            self.nsect = IO | COD;
+            self.status = DRDY | DSC | ERR;
+        } else if out.is_empty() {
+            self.xfer = Xfer::None;
+            self.nsect = IO | COD;
+            self.status = DRDY | DSC;
+        } else {
+            self.pkt = out;
+            self.xfer = Xfer::PacketIn;
+            self.next_chunk();
+            return;
+        }
+        self.raise();
+    }
+
+    /// Offer the next chunk of packet data to the host, or complete the command.
+    fn next_chunk(&mut self) {
+        if self.pkt.is_empty() {
+            self.xfer = Xfer::None;
+            self.nsect = IO | COD;
+            self.status = DRDY | DSC;
+        } else {
+            let n = self.pkt.len().min(self.pkt_limit);
+            self.buf = self.pkt.drain(..n).collect();
+            // An odd final byte is padded to a whole word.
+            if n & 1 != 0 {
+                self.buf.push(0);
+            }
+            self.pos = 0;
+            self.cyl = n as u16;
+            self.nsect = IO;
+            self.status = DRDY | DSC | DRQ;
+        }
+        self.raise();
+    }
+
     /// Fill the buffer with the next block of sectors for a read.
     fn load_sectors(&mut self) {
         let Xfer::Read { count, per_irq } = self.xfer else { return };
@@ -614,6 +760,15 @@ impl Gayle {
     }
 
     fn data_read(&mut self) -> u16 {
+        if self.xfer == Xfer::PacketIn {
+            let v = (self.buf[self.pos] as u16) << 8 | self.buf[self.pos + 1] as u16;
+            self.pos += 2;
+            if self.pos >= self.buf.len() {
+                self.activity += 1;
+                self.next_chunk();
+            }
+            return v;
+        }
         let Xfer::Read { count, per_irq } = self.xfer else { return 0xffff };
         let v = (self.buf[self.pos] as u16) << 8 | self.buf[self.pos + 1] as u16;
         self.pos += 2;
@@ -637,6 +792,35 @@ impl Gayle {
     }
 
     fn data_write(&mut self, v: u16) {
+        if matches!(self.xfer, Xfer::Packet | Xfer::PacketOut { .. }) {
+            self.buf[self.pos] = (v >> 8) as u8;
+            self.buf[self.pos + 1] = v as u8;
+            self.pos += 2;
+            if self.pos < self.buf.len() {
+                return;
+            }
+            match self.xfer {
+                Xfer::Packet => {
+                    let cdb: [u8; 12] = self.buf[..12].try_into().unwrap();
+                    let len = crate::scsi::HardDisk::data_out_len(&cdb);
+                    if len == 0 {
+                        return self.run_packet(cdb, &[]);
+                    }
+                    self.buf = vec![0; len.next_multiple_of(2)];
+                    self.pos = 0;
+                    self.xfer = Xfer::PacketOut { cdb };
+                    self.cyl = len as u16;
+                    self.nsect = 0;
+                    self.raise();
+                }
+                Xfer::PacketOut { cdb } => {
+                    let data = std::mem::take(&mut self.buf);
+                    self.run_packet(cdb, &data);
+                }
+                _ => unreachable!(),
+            }
+            return;
+        }
         let Xfer::Write { count, per_irq } = self.xfer else { return };
         self.buf[self.pos] = (v >> 8) as u8;
         self.buf[self.pos + 1] = v as u8;

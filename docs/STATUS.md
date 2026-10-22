@@ -6,7 +6,8 @@
 - `tools/install-desktop.sh` adds it to the desktop's application menu (Omarchy, GNOME, KDE...) with an icon; the entry starts in the checkout so the ROM and media folders are found.
 - `./target/release/amiga game.rp9` or `./target/release/amiga disk.adf` runs a title directly.
 - `--hdf image.hdf` (repeatable) attaches hard disks, SCSI IDs 0 up: to a disk controller chosen with `--board` (such as `a4091`), else the model's own (A3000 and A4000T SCSI, A600/A1200/A4000 IDE), else an A590/A2091 that is added for them.
-- `--cd image.iso` puts a SCSI CD-ROM drive with that disc at the next free SCSI ID on the same controller (an A590/A2091 is added if the machine has no SCSI).
+- `--cd image.iso` (or a `.cue` sheet with its BIN files) puts the disc in the CD32's drive. On other models it puts a SCSI CD-ROM drive at the next free SCSI ID on the same controller; a machine without SCSI gets an ATAPI drive on its IDE port (A600/A1200/A4000), or else an A590/A2091.
+- `--joy FRAME:BUTTONS` (headless) holds joystick buttons for 10 frames, e.g. `1100:fire` or `900:left+fire`.
   RP9 hard disk titles also need the shared Amiga Forever boot disks (`workbench-135.hdf` etc. from
   `Amiga Files/Shared/hdf` on the AF DVD) in `./hdf`.
   Packages built on host folders (AROS, Amiga 4000 Enhanced 3.X) need `Amiga Files/Shared/dir` in `./dir`.
@@ -82,8 +83,13 @@ Amiga Forever ships AROS and the enhanced OS 3.X installation as plain folders (
 - **Amiga 4000 Enhanced 3.X** boots the 3.X ROM from System with Work as DH1. It first shows "uaegfx.card could not be opened" (no RTG card); after OK (`--type 1000:\Av` headless), Workbench comes up on AGA.
 - **AROS** boots from its folder to Wanderer on an A4000 given 16 MB motherboard and 64 MB Zorro III RAM. With the default 4 MB, its stacks ended up in chip RAM, and remapping its true-colour images for AGA took minutes.
 
-### CD32 (no CD drive yet)
-The CD32 model has Akiko at `$B80000` (`src/akiko.rs`): the chip ID, the chunky-to-planar converter, and the I2C settings NVRAM (a 24C08, kept in memory). The extended ROM loads automatically. Without a CD drive the machine boots to its "Amiga CD32" disc animation. The Amiga Forever DVD has no CD images to test a drive with.
+### CD32
+The CD32 model has Akiko at `$B80000` (`src/akiko.rs`): the chip ID, the chunky-to-planar converter, and the I2C settings NVRAM (a 24C08, kept in memory). The extended ROM loads automatically. Without a disc the machine boots to its "Amiga CD32" disc animation.
+
+The CD drive (`src/akiko_cd.rs`, after WinUAE's akiko.cpp) talks to the ROM over Akiko's DMA rings. It supports the status/firmware, TOC, data read (raw sectors into the PBX slots), CD audio play/pause/stop, Q subchannel and LED commands. Discs are ISO files or CUE/BIN sheets with audio tracks (`src/cdimage.rs`). CD audio is mixed with Paula's output. CIA-A PA0 mutes it, because the CD32 has no ROM overlay bit; treating PA0 as the overlay made the CD player crash when it unmuted.
+- Amiga CD32 Gamer Vol. 12 (archive.org, CUE/BIN) boots to its menu.
+- Its audio tracks, in a cue sheet without the data track, play in the ROM's CD player, which shows the track and the running time.
+- Not yet emulated: the CD32 joypad's extra buttons, CD+G and audio scanning.
 
 ### 68000 bus timing (Voyage)
 Voyage (Razor 1911) now runs. Its protection needed three timing details:
@@ -112,9 +118,18 @@ The 53C710 runs SCRIPTS, its own programs fetched from memory by DMA (`src/ncr71
 - SCSI CD-ROM drive (`--cd`): an ISO 9660 image read from the file as needed, with 2048-byte blocks, INQUIRY type 5 (removable), READ(6/10/12), READ CAPACITY, READ TOC (LBA and MSF), READ SUB-CHANNEL and MODE SENSE (write-protected). With the Amiga Forever System folder's CacheCDFS mounted on scsi.device unit 1, the Amiga Forever DVD image mounts as a 1614 MB volume on the A4091 and on the A3000's SCSI.
 - I/O boards share one interface (`Controller` in `src/expansion/`): registers, boot ROM, DMA, interrupt, reset and disks. The next storage chips (53C9x, 5380) will plug in the same way.
 
+### ATAPI CD-ROM (A600, A1200, A4000)
+On an IDE port the CD-ROM drive is an ATAPI device (`src/gayle.rs`). It answers IDENTIFY DEVICE with an abort and the $EB14 signature, IDENTIFY PACKET DEVICE, and PACKET: the host writes a 12-byte command, the drive executes it with the SCSI CD-ROM code (`src/scsi.rs`, which also has MODE SENSE/SELECT(10) for ATAPI drivers), and the data goes back in chunks no larger than the byte count limit, with the interrupt reason in the sector count register. Errors set CHK with the sense key in the error register.
+- The scsi.device of the Kickstart 3.X ROMs (43.46) finds the drive, and CacheCDFS mounts the Amiga Forever DVD on the A600, A1200 and A4000. Kickstart 3.1's scsi.device has no ATAPI support (like the real ROM): the machine boots, but the drive cannot be used.
+
+### PCMCIA memory cards (A600, A1200)
+`--pcmcia image` puts an SRAM card (up to 4 MB) in Gayle's slot: common memory at `$600000`, attribute memory (the card's CIS, one byte per even address) at `$A00000`. A folder becomes an FFS-formatted card, the smallest of 512 KB, 1, 2 or 4 MB that holds it. Writes stay in memory.
+- Insertion sets Gayle's card-detect bit in the status latch and raises INT6, as the hardware does. (Raising INT2 instead made Kickstart 2.05 hang at a white screen.)
+- A blank card (no CISTPL_FORMAT tuple) is added as Fast RAM by Kickstart 2.05 and 3.x. A card made from a folder carries CISTPL_FORMAT and CISTPL_GEOMETRY tuples, and carddisk.device mounts it as `CC0:`.
+
 ### Remaining open items
 - **Incision works but precalculates for a long time.** It renders its soundtrack first; at 64x the intro starts by frame 9000.
-- **Not emulated:** the CD32's CD-ROM drive, the CDTV, PowerPC boards, UAE's RTG card (uaegfx), and the user's own shared folder (`<harddrive root="shared"/>`, which is skipped). The Walker prototype's folders are not on the AF 11 DVD.
+- **Not emulated:** the CDTV, PowerPC boards, UAE's RTG card (uaegfx), and the user's own shared folder (`<harddrive root="shared"/>`, which is skipped). The Walker prototype's folders are not on the AF 11 DVD.
 - **Not Amiga software:** the Videos and Gallery packages (DVD video and host images for Amiga Forever's player). The emulator now refuses them with that explanation.
 
 ## Known issues and open items
@@ -133,4 +148,4 @@ The 53C710 runs SCRIPTS, its own programs fetched from memory by DMA (`src/ncr71
 ## Next milestones
 
 1. A3000 polish (the SDMAC works; nothing beyond booting is tested).
-2. CD32 CD-ROM drive (Akiko's CD controller, ISO/CUE images) and the CD32 joypad; CDTV.
+2. The CD32 joypad, then the CDTV (its CD drive and controller).
