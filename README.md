@@ -37,14 +37,50 @@ On Linux, `tools/install-desktop.sh` adds RustyAmiga to the desktop's applicatio
 
 ## ROMs and media
 
-No ROMs or Amiga software are included. RustyAmiga uses the files from
-[Amiga Forever](https://www.amigaforever.com/), including its encrypted ROMs and `rom.key`:
+The Amiga's custom chips (Agnus, Denise, Paula and the rest) contain no ROM code, so nothing is
+needed for them. What an Amiga does need is a **Kickstart ROM**, the boot firmware and core of
+AmigaOS. Some expansion boards also need their own **boot ROM**. These are still under copyright, so
+none are included. Here are the legal ways to get them.
+
+### Kickstart and board ROMs
+
+- **[Amiga Forever](https://www.amigaforever.com/)** by Cloanto, which holds the licence to the
+  classic Amiga ROMs and OS. This is the easiest option, and the one RustyAmiga is built around. The
+  Plus and Premium editions include every Kickstart version (1.0 to 3.X, for each model). They also
+  include board ROMs that RustyAmiga uses: the A590/A2091 and A4091 SCSI boot ROMs, the CD32
+  extended ROM, and the CDTV and A570 extended ROMs. On top of that, they include the Workbench
+  disks and a collection of licensed games and demos as `.rp9` packages. The ROMs are encrypted;
+  copy them together with their `rom.key` and RustyAmiga decrypts them as it loads them. Check
+  Cloanto's edition comparison before buying, because the cheaper editions include fewer ROMs.
+- **Your own Amiga.** If you own the hardware, you can read the ROM out of it with a tool such as
+  TransROM (part of Amiga Forever's transfer tools) or with an EPROM reader. The legality of making
+  a personal copy varies by country.
+- **AmigaOS 3.1.4 / 3.2** from [Hyperion Entertainment](https://www.hyperion-entertainment.com/) are
+  modern updates of the classic OS, sold for real Amigas through Amiga dealers. Check the package
+  contents for whether ROM files for emulators are included.
+- **[AROS](https://aros.sourceforge.io/)** is a free, open-source replacement for Kickstart and
+  AmigaOS (AROS Public License). It needs no purchase, and RustyAmiga boots its ROM. It runs
+  system-friendly software well, but games and demos that rely on the original Kickstart's internals
+  may not work.
+
+ROMs dumped from real hardware and unencrypted ROM files also work; pass them with `--rom`.
+
+### Software
+
+- **Amiga Forever** includes many licensed games and demos ready to run.
+- **Demos** are generally free to download from their authors and from archives such as
+  [scene.org](https://www.scene.org/).
+- **Games:** many publishers and authors have released their Amiga games for free download; look
+  for an explicit release statement, and buy the rest from their rights holders where they are
+  still sold. Copies of commercial games found on general download sites are usually not legal.
+
+### Where RustyAmiga looks for files
 
 | Folder | Contents |
 |---|---|
-| `roms/` | Kickstart and board ROMs, and `rom.key` |
-| `hdf/`, `adf/` | Amiga Forever's shared boot disks |
-| `dir/` | Amiga Forever's shared system folders (AROS, OS 3.X) |
+| `roms/` | Kickstart and board ROMs, and `rom.key` (Amiga Forever file names, such as `amiga-os-310-a1200.rom`) |
+| `hdf/`, `adf/` | Amiga Forever's shared boot disks (`Amiga Files/Shared/hdf` and `adf`) |
+| `dir/` | Amiga Forever's shared system folders: AROS and OS 3.X (`Amiga Files/Shared/dir`) |
 | `titles/` | `.rp9` packages |
 
 ## Examples
