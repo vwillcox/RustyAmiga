@@ -84,7 +84,7 @@ Amiga Forever ships AROS and the enhanced OS 3.X installation as plain folders (
 - **AROS** boots from its folder to Wanderer on an A4000 given 16 MB motherboard and 64 MB Zorro III RAM. With the default 4 MB, its stacks ended up in chip RAM, and remapping its true-colour images for AGA took minutes.
 
 ### CD32
-The CD32 model has Akiko at `$B80000` (`src/akiko.rs`): the chip ID, the chunky-to-planar converter, and the I2C settings NVRAM (a 24C08, kept in memory). The extended ROM loads automatically. Without a disc the machine boots to its "Amiga CD32" disc animation.
+The CD32 model has Akiko at `$B80000` (`src/akiko.rs`): the chip ID, the chunky-to-planar converter, and the I2C settings NVRAM (a 24C08, saved to `~/.config/amiga/nvram/cd32.nvram` by windowed runs). The extended ROM loads automatically. Without a disc the machine boots to its "Amiga CD32" disc animation.
 
 The CD drive (`src/akiko_cd.rs`, after WinUAE's akiko.cpp) talks to the ROM over Akiko's DMA rings. It supports the status/firmware, TOC, data read (raw sectors into the PBX slots), CD audio play/pause/stop, Q subchannel and LED commands. Discs are ISO files or CUE/BIN sheets with audio tracks (`src/cdimage.rs`). CD audio is mixed with Paula's output. CIA-A PA0 mutes it, because the CD32 has no ROM overlay bit; treating PA0 as the overlay made the CD player crash when it unmuted.
 - Amiga CD32 Gamer Vol. 12 (archive.org, CUE/BIN) boots to its menu.
@@ -98,11 +98,11 @@ The CD drive (`src/akiko_cd.rs`, after WinUAE's akiko.cpp) talks to the ROM over
 
 The CD controller (`src/cdtv.rs`, after WinUAE's cdtv.cpp) is the DMAC on the autoconfig chain at $E90000. It includes the 6525 TriPort, whose port C carries the drive's handshake lines as INT2 interrupts, and the Matshita drive's command set: status, model, mode set, read with DMAC word DMA, TOC, Q subchannel, and CD audio play/pause with the DAC volume.
 - Without a disc it shows the CDTV animation.
-- CDPD Vol. 1 (CUE/BIN) boots from the CD to its "CDTV Workbench disk" CLI.
-- Open items:
-  - The disc's startup prints "Battery Backed up Clock not found".
-  - CD+G subchannel bytes (SBCP), the front panel, the IR remote and the memory card are not emulated.
-  - The NVRAM is not saved between runs.
+- CDPD Vol. 1 (CUE/BIN) boots from the CD to Workbench. Its 1.3 SetClock finds the clock, though it reads 2026 as 1978, as it would on a real CDTV.
+- An audio-only cue sheet brings up the CDTV player, which lists the tracks and plays them (fire on Play).
+- There is no floppy drive unless one is asked for (`--drives 1` or `--df0`), as on a stock CDTV. Kickstart 1.3's strap reads DF0 anyway (with no drive, /CHNG floats high, which reads as "disk present"). The read line then carries noise, as in WinUAE, so the read finds a sync and fails, and the boot moves on to the CD. Workbench shows a DF0:BAD icon.
+- The bookmark RAM is saved to `~/.config/amiga/nvram/cdtv.nvram` by windowed runs.
+- Not yet emulated: CD+G subchannel bytes (SBCP), the front panel, the IR remote and the memory card.
 
 ### 68000 bus timing (Voyage)
 Voyage (Razor 1911) now runs. Its protection needed three timing details:
@@ -122,7 +122,7 @@ Floppy motor whirr, head steps (loading chugs; an empty drive clicks) and hard d
 ### Expansion boards and clocks
 Boards sit on one autoconfig chain (`src/expansion/`): Zorro II boards answer at `$E80000`, Zorro III boards at `$FF000000`, in slot order. `--board ID[:options]` adds a board from the registry (`--list-boards`), and the launcher has an Expansion boards section. The generic fast RAM options (`--fast`, `--z3`, RP9 RAM) and the A590/A2091 use the same chain. The plan for the rest of the boards is in `docs/ADDONS.md`.
 - RAM boards with their real IDs: A2052, A2058, A560, Supra 500RX/2000, MicroBotics 8-Up, GVP Impact Series II, Oktagon 2008, MBX 1200z; the A2091 can carry its own RAM (`a2091:ram=2M`).
-- Battery-backed clocks at `$DC0000`: OKI MSM6242B on the A2000 and A500+ and on the A501, A601 and MBX 1200z trapdoor boards; Ricoh RF5C01A on the A3000/A4000. They run from the host's local time; setting the date from AmigaOS holds for the session.
+- Battery-backed clocks at `$DC0000`: OKI MSM6242B on the A2000 and A500+ and on the A501, A601 and MBX 1200z trapdoor boards; Ricoh RF5C01A on the A3000/A4000. They start at the host's local time and count emulated time (so warp mode does not confuse programs that time them); setting the date from AmigaOS holds for the session.
 
 ### NCR 53C710: A4091 and A4000T
 The 53C710 runs SCRIPTS, its own programs fetched from memory by DMA (`src/ncr710.rs`): block moves (direct, indirect, table indirect), SELECT (also table indirect), WAIT DISCONNECT/RESELECT, SET/CLEAR ATN and ACK, jumps, calls, returns and INT on phase and data conditions with relative addressing, register arithmetic, and memory moves, including those that target the chip's own registers. The targets' side of the bus (`src/scsi.rs`) handles messages: IDENTIFY, synchronous and wide negotiation (answered as asynchronous, 8-bit), MESSAGE REJECT and ABORT. ATN and the ACK held after MESSAGE IN are modelled. Missing targets time out after 1 ms.
@@ -161,4 +161,4 @@ On an IDE port the CD-ROM drive is an ATAPI device (`src/gayle.rs`). It answers 
 ## Next milestones
 
 1. A3000 polish (the SDMAC works; nothing beyond booting is tested).
-2. CDTV: the clock check, the front panel and IR remote, CD audio tests; NVRAM saving.
+2. CDTV: the front panel and IR remote.
