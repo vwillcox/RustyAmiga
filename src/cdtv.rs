@@ -823,6 +823,37 @@ impl Controller for CdtvDmac {
     fn take_cd_audio(&mut self, out: &mut VecDeque<(i16, i16)>) {
         out.extend(self.samples.drain(..));
     }
+
+    fn front_panel_active(&self) -> bool {
+        self.front_panel
+    }
+
+    fn front_panel(&mut self, button: u8) {
+        // As WinUAE's cdtv_front_panel: rewind and fast forward do nothing.
+        let Some(d) = &self.disc else { return };
+        let leadout = d.leadout;
+        match button {
+            0 => {
+                self.stop_audio();
+                self.stch_pending = true;
+            }
+            1 if self.playing => self.pause(!self.paused),
+            1 => {
+                if let Some(t) = d.tracks.iter().find(|t| t.audio) {
+                    self.start_play(t.start, leadout);
+                }
+            }
+            2 | 3 if self.playing => {
+                let track = from_bcd(d.q_subchannel(self.qpos)[1]);
+                let want = if button == 2 { track.saturating_sub(1).max(1) } else { track + 1 };
+                let start = d.tracks.iter().find(|t| t.number == want).or_else(|| d.tracks.iter().find(|t| t.number == track)).map(|t| t.start);
+                if let Some(start) = start {
+                    self.start_play(start, leadout);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 #[cfg(test)]

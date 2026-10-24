@@ -168,6 +168,8 @@ pub struct Board {
     /// CD32 joypad's other buttons: play, reverse, forward, green, yellow
     /// (red and blue are fire and fire2).
     pub pad: [bool; 5],
+    /// The pad buttons as last seen, for the CDTV's remote buttons.
+    pad_prev: [bool; 5],
     /// The CD32 joypad is plugged into port 2.
     pub cd32_pad: bool,
     /// The pad's shift register: bits left to send (8 = reloaded).
@@ -295,6 +297,7 @@ impl Board {
             mouse_right: false,
             joy: [false; 6],
             pad: [false; 5],
+            pad_prev: [false; 5],
             cd32_pad: cfg.model == crate::config::Model::Cd32,
             pad_shift: 8,
             pad_clock: false,
@@ -621,6 +624,7 @@ impl Board {
             self.frame_count += 1;
             self.intreq |= int::VERTB;
             self.cia_a.tod_tick();
+            self.cdtv_buttons();
             self.cop_pc = self.cop1lc;
             self.cop_state = CopState::Fetch1;
             for n in 0..8 {
@@ -1590,6 +1594,34 @@ enum Region {
 }
 
 impl Board {
+    /// On the CDTV the CD32 pad's buttons stand in for the front panel and remote:
+    /// play is play/pause, reverse and forward skip tracks, green is stop. They
+    /// reach the machine as raw keys $72-$77, unless the ROM has put the drive in
+    /// front-panel mode, where the drive acts on them itself.
+    fn cdtv_buttons(&mut self) {
+        if self.cfg.model != crate::config::Model::Cdtv || self.pad == self.pad_prev {
+            return;
+        }
+        const BUTTON: [u8; 4] = [1, 2, 3, 0];
+        for i in 0..4 {
+            let down = self.pad[i];
+            if down == self.pad_prev[i] {
+                continue;
+            }
+            let b = BUTTON[i];
+            let drive = self.exp.cards.iter_mut().find_map(|c| match &mut c.dev {
+                Device::Io(d) if d.front_panel_active() => Some(d),
+                _ => None,
+            });
+            match drive {
+                Some(d) if down => d.front_panel(b),
+                Some(_) => {}
+                None => self.keyboard.key(0x72 + b, down),
+            }
+        }
+        self.pad_prev = self.pad;
+    }
+
     /// The battery-backed or EEPROM memory that should outlive the session, with a
     /// short name for its file: the CDTV's bookmark RAM, the CD32's settings EEPROM.
     pub fn nvram_mut(&mut self) -> Option<(&'static str, &mut Vec<u8>)> {

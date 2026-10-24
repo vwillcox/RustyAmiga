@@ -102,7 +102,8 @@ The CD controller (`src/cdtv.rs`, after WinUAE's cdtv.cpp) is the DMAC on the au
 - An audio-only cue sheet brings up the CDTV player, which lists the tracks and plays them (fire on Play).
 - There is no floppy drive unless one is asked for (`--drives 1` or `--df0`), as on a stock CDTV. Kickstart 1.3's strap reads DF0 anyway (with no drive, /CHNG floats high, which reads as "disk present"). The read line then carries noise, as in WinUAE, so the read finds a sync and fails, and the boot moves on to the CD. Workbench shows a DF0:BAD icon.
 - The bookmark RAM is saved to `~/.config/amiga/nvram/cdtv.nvram` by windowed runs.
-- Not yet emulated: CD+G subchannel bytes (SBCP), the front panel, the IR remote and the memory card.
+- Front panel and remote: the CD buttons reach the machine as raw keys $72-$77 (stop, play/pause, previous, next, rewind, fast forward), or go straight to the drive while the ROM has it in front-panel mode (drive command $A3), as in WinUAE. The CD32 pad's buttons stand in for them: play is play/pause, reverse/forward are previous/next track, green is stop. So P, [, ], G with the joystick keys on, a gamepad's Start, shoulders and West button, or `--joy 800:play` headless. In the ROM's player these play, skip and stop.
+- Not yet emulated: CD+G subchannel bytes (SBCP), the remote's mouse/joystick mode and the memory card.
 
 ### 68000 bus timing (Voyage)
 Voyage (Razor 1911) now runs. Its protection needed three timing details:
@@ -161,4 +162,4 @@ On an IDE port the CD-ROM drive is an ATAPI device (`src/gayle.rs`). It answers 
 ## Next milestones
 
 1. A3000 polish (the SDMAC works; nothing beyond booting is tested).
-2. CDTV: the front panel and IR remote.
+2. CDTV: the remote's mouse/joystick mode, CD+G, the memory card.

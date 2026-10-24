@@ -102,8 +102,8 @@ amiga --list-boards
 
 ## Status
 
-RustyAmiga is a work in progress. Not yet emulated: the CD32 FMV module, the CDTV front panel
-and infrared remote, RTG graphics cards, MMU address translation, the 68060, and PowerPC boards.
+RustyAmiga is a work in progress. Not yet emulated: the CD32 FMV module, the CDTV remote's
+mouse mode, RTG graphics cards, MMU address translation, the 68060, and PowerPC boards.
 
 ## Licence
 

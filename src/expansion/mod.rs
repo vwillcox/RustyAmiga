@@ -142,6 +142,14 @@ pub trait Controller: Send {
     }
     /// Move CD audio (44.1 kHz stereo) produced so far into `out`.
     fn take_cd_audio(&mut self, _out: &mut std::collections::VecDeque<(i16, i16)>) {}
+    /// A CDTV drive the ROM has put in front-panel mode, where it handles the
+    /// panel and remote's CD buttons itself instead of the keyboard sending them.
+    fn front_panel_active(&self) -> bool {
+        false
+    }
+    /// Press a CD button (0 stop, 1 play/pause, 2 previous, 3 next, 4 rewind,
+    /// 5 fast forward) on a drive in front-panel mode.
+    fn front_panel(&mut self, _button: u8) {}
 }
 
 /// What a card does once configured.
