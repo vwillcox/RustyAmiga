@@ -1590,6 +1590,18 @@ enum Region {
 }
 
 impl Board {
+    /// The battery-backed or EEPROM memory that should outlive the session, with a
+    /// short name for its file: the CDTV's bookmark RAM, the CD32's settings EEPROM.
+    pub fn nvram_mut(&mut self) -> Option<(&'static str, &mut Vec<u8>)> {
+        if let Some(a) = self.akiko.as_mut() {
+            Some(("cd32", &mut a.nvram))
+        } else if !self.nvram.is_empty() {
+            Some(("cdtv", &mut self.nvram))
+        } else {
+            None
+        }
+    }
+
     #[inline]
     fn region(&self, a: u32, write: bool) -> Region {
         if a >> 24 != 0 && self.cfg.model.addr32() {

@@ -796,5 +796,16 @@ fn main() {
         }
         return;
     }
-    frontend::run(amiga, frontend::Options { swap_disks: floppies, write_protect: args.write_protect });
+    // NVRAM persists between windowed sessions; headless runs start fresh so
+    // they stay reproducible.
+    let nvram = std::env::var_os("HOME").zip(amiga.board.nvram_mut()).map(|(home, (name, mem))| {
+        let path = PathBuf::from(home).join(".config/amiga/nvram").join(format!("{name}.nvram"));
+        match std::fs::read(&path) {
+            Ok(data) if data.len() == mem.len() => mem.copy_from_slice(&data),
+            Ok(_) => log::warn!("ignoring {}: wrong size", path.display()),
+            Err(_) => {}
+        }
+        path
+    });
+    frontend::run(amiga, frontend::Options { swap_disks: floppies, write_protect: args.write_protect, nvram });
 }

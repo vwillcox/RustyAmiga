@@ -33,7 +33,8 @@ pub struct Akiko {
     write_idx: usize,
     read_idx: usize,
 
-    nvram: Vec<u8>,
+    /// The settings EEPROM (I2C, 1 KB).
+    pub nvram: Vec<u8>,
     io_dir: u8,
     io_out: u8,
     i2c: I2c,

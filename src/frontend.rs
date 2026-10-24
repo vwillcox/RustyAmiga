@@ -46,6 +46,8 @@ impl SwapDisk {
 pub struct Options {
     pub swap_disks: Vec<SwapDisk>,
     pub write_protect: bool,
+    /// Where the machine's NVRAM is saved on exit.
+    pub nvram: Option<std::path::PathBuf>,
 }
 
 struct App {
@@ -629,5 +631,11 @@ pub fn run(mut amiga: Amiga, opts: Options) {
     el.run_app(&mut app).expect("run event loop");
     for d in app.amiga.board.drives.iter_mut() {
         d.eject();
+    }
+    if let (Some(path), Some((_, mem))) = (&app.opts.nvram, app.amiga.board.nvram_mut()) {
+        let saved = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|_| std::fs::write(path, &mem[..]));
+        if let Err(e) = saved {
+            log::warn!("saving NVRAM to {}: {e}", path.display());
+        }
     }
 }
