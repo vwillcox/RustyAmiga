@@ -8,15 +8,16 @@ behave as they did on a real machine.
 
 ## What it runs
 
-- **Machines:** A1000, A500, A500+, A600, A2000, A1200, A3000, A4000, A4000T, and the CD32
-  (which doesn't have a CD drive yet).
+- **Machines:** A1000, A500, A500+, A600, A2000, A1200, A3000, A4000, A4000T, the CD32 (with
+  its CD drive, CD audio and joypad) and the CDTV (with its CD drive and player). Their NVRAM is
+  kept between sessions in `~/.config/amiga/nvram`.
 - **Chipsets:** OCS, ECS and AGA, including HAM8, the AGA sprite and fetch modes, and the
   undocumented tricks that demos rely on.
 - **CPUs:** a cycle-exact 68000 (it matches all 261,894 SingleStepTests cases, including cycle
   counts), plus the 68020, 68030 and 68040, and the 68881, 68882 and 68040 FPUs.
 - **Storage:** floppies (DD and HD), A590/A2091 and A3000 SCSI, A600/A1200/A4000 IDE, the A4091 and
-  A4000T NCR 53C710 SCSI, SCSI CD-ROM drives, PCMCIA memory cards, and host folders mounted as
-  hard disks.
+  A4000T NCR 53C710 SCSI, SCSI and ATAPI CD-ROM drives (ISO or CUE/BIN), PCMCIA memory cards,
+  and host folders mounted as hard disks.
 - **Expansion:** Zorro II/III autoconfig, RAM boards with their real IDs, trapdoor boards, and
   battery-backed clocks.
 - **Amiga Forever titles:** most of the games and demos in the Amiga Forever collection run
@@ -101,8 +102,8 @@ amiga --list-boards
 
 ## Status
 
-RustyAmiga is a work in progress. Not yet emulated: the CD32 and CDTV CD drives, RTG graphics
-cards, MMU address translation, the 68060, and PowerPC boards.
+RustyAmiga is a work in progress. Not yet emulated: the CD32 FMV module, the CDTV front panel
+and infrared remote, RTG graphics cards, MMU address translation, the 68060, and PowerPC boards.
 
 ## Licence
 

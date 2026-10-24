@@ -131,4 +131,4 @@ speed, so test results are repeatable.
 The plan in [docs/ADDONS.md](docs/ADDONS.md) is to offer every Amiga add-on board as a machine
 option, by emulating each chip family once and describing boards as data on top of it. Next are more
 storage controllers (53C9x, 5380, IDE boards), RTG graphics cards, accelerators with the 68060 and
-MMU, sound and network cards, and the CD32 and CDTV CD drives.
+MMU, sound and network cards, and the CD32 FMV module.
