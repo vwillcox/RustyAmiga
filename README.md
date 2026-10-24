@@ -18,8 +18,9 @@ behave as they did on a real machine.
 - **Storage:** floppies (DD and HD), A590/A2091 and A3000 SCSI, A600/A1200/A4000 IDE, the A4091 and
   A4000T NCR 53C710 SCSI, SCSI and ATAPI CD-ROM drives (ISO or CUE/BIN), PCMCIA memory cards,
   and host folders mounted as hard disks.
-- **Expansion:** Zorro II/III autoconfig, RAM boards with their real IDs, trapdoor boards, and
-  battery-backed clocks.
+- **Expansion:** Zorro II/III autoconfig, RAM boards with their real IDs, trapdoor boards,
+  battery-backed clocks, and UAE's virtual graphics card (uaegfx) for Picasso96 screens up to
+  1920x1080.
 - **Amiga Forever titles:** most of the games and demos in the Amiga Forever collection run
   straight from their `.rp9` packages.
 - **Extras:** a graphical launcher, synthesized floppy and hard disk drive noises, front-panel
@@ -103,7 +104,7 @@ amiga --list-boards
 ## Status
 
 RustyAmiga is a work in progress. Not yet emulated: the CD32 FMV module, the CDTV remote's
-mouse mode, RTG graphics cards, MMU address translation, the 68060, and PowerPC boards.
+mouse mode, real RTG graphics cards, MMU address translation, the 68060, and PowerPC boards.
 
 ## Licence
 

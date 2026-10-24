@@ -78,8 +78,12 @@ pub struct Board {
     pub rom: Vec<u8>,
     /// Extension ROM at $E00000 (AROS, CD32, CDTV).
     pub ext_rom: Vec<u8>,
+    /// The emulator's own ROM at $F00000 (64 KB), empty when not needed.
+    pub boot_rom: Vec<u8>,
     /// The CDTV's battery-backed RAM at $DC8000 (16 KB).
     pub nvram: Vec<u8>,
+    /// UAE's virtual graphics card, when its VRAM board is fitted.
+    pub rtg: Option<crate::rtg::Rtg>,
     rom_mask: u32,
     pub overlay: bool,
 
@@ -212,7 +216,7 @@ impl Board {
             drives.push(Drive::new(i < cfg.drives));
         }
         let cck_rate = if cfg.ntsc { NTSC_CCK_RATE } else { PAL_CCK_RATE };
-        Board {
+        let mut b = Board {
             chip: vec![0; chip_size],
             chip_mask: chip_size as u32 - 1,
             slow: vec![0; cfg.slow_kb as usize * 1024],
@@ -231,7 +235,9 @@ impl Board {
             rom,
             rom_mask,
             ext_rom: vec![],
+            boot_rom: vec![],
             nvram: if cfg.model == crate::config::Model::Cdtv { vec![0; 0x4000] } else { vec![] },
+            rtg: None,
             overlay: true,
             cycles: 0,
             cck: 0,
@@ -312,7 +318,12 @@ impl Board {
             cycle_frac: 0,
             ramsey_ctl: 0,
             cfg,
+        };
+        b.rtg = b.exp.cards.iter().position(|c| c.board == "uaegfx").map(crate::rtg::Rtg::new);
+        if b.rtg.is_some() {
+            b.boot_rom = crate::rtg::boot_rom();
         }
+        b
     }
 
     pub fn leds(&self) -> Leds {
@@ -337,7 +348,11 @@ impl Board {
         Leds { power: pra & 2 == 0, floppy, hd }
     }
 
+    /// The picture to show: the graphics card's while its switch is on.
     pub fn framebuffer(&self) -> (&[u32], usize, usize) {
+        if let Some(f) = self.rtg.as_ref().and_then(|r| r.framebuffer()) {
+            return f;
+        }
         (&self.denise.fb, FB_W, FB_H)
     }
 
@@ -400,6 +415,9 @@ impl Board {
 
     /// Reset everything except memory contents (power-on or RESET line).
     fn reset_chips(&mut self) {
+        if let Some(r) = &mut self.rtg {
+            r.reset();
+        }
         self.cia_a.reset();
         self.cia_b.reset();
         self.overlay = true;
@@ -625,6 +643,14 @@ impl Board {
             self.intreq |= int::VERTB;
             self.cia_a.tod_tick();
             self.cdtv_buttons();
+            if let Some(r) = &mut self.rtg {
+                if r.on {
+                    let card = &self.exp.cards[r.card];
+                    if let (Some(base), crate::expansion::Device::Ram(vram)) = (card.base, &card.dev) {
+                        r.render(vram, base);
+                    }
+                }
+            }
             self.cop_pc = self.cop1lc;
             self.cop_state = CopState::Fetch1;
             for n in 0..8 {
@@ -1550,6 +1576,7 @@ impl Board {
             Region::Ram(i, o) => b(o, self.exp.ram_ref(i)),
             Region::Rom(o) => b(o, &self.rom),
             Region::ExtRom(o) => b(o, &self.ext_rom),
+            Region::BootRom(o) => b(o, &self.boot_rom),
             Region::Scsi(o) if o >= 0x2000 => self.scsi.as_ref().unwrap().peek_rom16(o),
             Region::Io(i, o) => match &self.exp.cards[i].dev {
                 Device::Io(d) => d.peek16(o),
@@ -1571,6 +1598,8 @@ enum Region {
     Ram(usize, usize),
     Rom(usize),
     ExtRom(usize),
+    /// The emulator's own ROM at $F00000 (the graphics card driver).
+    BootRom(usize),
     Custom,
     Cia,
     Autoconfig,
@@ -1680,6 +1709,7 @@ impl Board {
             0xf0..=0xf7 if self.cfg.model == crate::config::Model::Cdtv && !self.ext_rom.is_empty() => {
                 Region::ExtRom((a as usize - 0xf0_0000) % self.ext_rom.len())
             }
+            0xf0 if !self.boot_rom.is_empty() => Region::BootRom(a as usize & 0xffff),
             0xe0..=0xe7 if !self.ext_rom.is_empty() && self.cfg.model != crate::config::Model::Cdtv => Region::ExtRom((a as usize - 0xe0_0000) % self.ext_rom.len()),
             0xe0..=0xe7 if self.rom.len() > 0x80000 => Region::Rom((a & self.rom_mask) as usize),
             _ => {
@@ -1814,6 +1844,10 @@ impl Bus for Board {
                 self.cpu_cycles(4);
                 self.ext_rom[o]
             }
+            Region::BootRom(o) => {
+                self.cpu_cycles(4);
+                self.boot_rom[o]
+            }
             Region::Nvram(o) => {
                 self.cpu_cycles(4);
                 self.nvram[o]
@@ -1925,6 +1959,10 @@ impl Bus for Board {
             Region::ExtRom(o) => {
                 self.cpu_cycles(4);
                 (self.ext_rom[o] as u16) << 8 | self.ext_rom[o + 1] as u16
+            }
+            Region::BootRom(o) => {
+                self.cpu_cycles(4);
+                (self.boot_rom[o] as u16) << 8 | self.boot_rom[o + 1] as u16
             }
             Region::Nvram(o) => {
                 self.cpu_cycles(4);
@@ -2068,7 +2106,7 @@ impl Bus for Board {
                 self.scsi.as_mut().unwrap().write8(o, v, now);
                 self.update_cia_irq();
             }
-            Region::Rom(_) | Region::ExtRom(_) | Region::None => self.cpu_cycles(4),
+            Region::Rom(_) | Region::ExtRom(_) | Region::BootRom(_) | Region::None => self.cpu_cycles(4),
         }
     }
 
@@ -2163,7 +2201,7 @@ impl Bus for Board {
                 self.scsi.as_mut().unwrap().write16(o, v, now);
                 self.update_cia_irq();
             }
-            Region::Rom(_) | Region::ExtRom(_) | Region::None => self.cpu_cycles(4),
+            Region::Rom(_) | Region::ExtRom(_) | Region::BootRom(_) | Region::None => self.cpu_cycles(4),
         }
     }
 
@@ -2228,6 +2266,79 @@ impl Amiga {
         self.cpu.reset(&mut self.board);
     }
 
+    /// AmigaOS's ready and waiting tasks (exec's TaskReady and TaskWait lists):
+    /// name, state, the signals waited for and received, and the saved stack
+    /// pointer. Then Intuition's screens with their bitmaps.
+    pub fn exec_tasks(&self) -> Vec<String> {
+        let b = &self.board;
+        let rl = |a: u32| (b.peek16(a) as u32) << 16 | b.peek16(a + 2) as u32;
+        let name = |a: u32| -> String {
+            let mut s = String::new();
+            for i in 0..40 {
+                let w = b.peek16((a + i) & !1);
+                let c = if (a + i) & 1 == 0 { (w >> 8) as u8 } else { w as u8 };
+                if c == 0 {
+                    break;
+                }
+                s.push(c as char);
+            }
+            s
+        };
+        let exec = rl(4);
+        let mut out = vec![];
+        for (list, state) in [(406u32, "ready"), (420, "wait")] {
+            let mut n = rl(exec + list);
+            for _ in 0..100 {
+                let next = rl(n);
+                if next == 0 {
+                    break;
+                }
+                out.push(format!(
+                    "task {state:5} {:08x} {:24} sigwait={:08x} sigrecvd={:08x} sp={:08x}",
+                    n,
+                    name(rl(n + 10)),
+                    rl(n + 22),
+                    rl(n + 26),
+                    rl(n + 54)
+                ));
+                n = next;
+            }
+        }
+        // Intuition's screens, front to back.
+        let mut lib = rl(exec + 378);
+        for _ in 0..100 {
+            if rl(lib) == 0 {
+                break;
+            }
+            if name(rl(lib + 10)) == "intuition.library" {
+                let mut s = rl(lib + 60);
+                for _ in 0..20 {
+                    if s == 0 {
+                        break;
+                    }
+                    let bm = rl(s + 88);
+                    out.push(format!(
+                        "screen {:08x} {:24} {}x{} rp.bitmap={:08x} bpr={} rows={} flags={:02x} depth={} planes={:08x} {:08x}",
+                        s,
+                        name(rl(s + 22)),
+                        b.peek16(s + 12),
+                        b.peek16(s + 14),
+                        bm,
+                        b.peek16(bm),
+                        b.peek16(bm + 2),
+                        b.peek16(bm + 4) >> 8,
+                        b.peek16(bm + 4) & 0xff,
+                        rl(bm + 8),
+                        rl(bm + 12)
+                    ));
+                    s = rl(s);
+                }
+            }
+            lib = rl(lib);
+        }
+        out
+    }
+
     pub fn disasm(&self, pc: u32, n: usize) -> Vec<String> {
         let mut out = vec![];
         let mut a = pc;
@@ -2272,6 +2383,10 @@ impl Amiga {
                     }
                     h.push_back(self.cpu.pc);
                 }
+            }
+            if self.cpu.pc == crate::rtg::TRAP_PC && self.board.rtg.is_some() {
+                crate::rtg::trap(&mut self.cpu, &mut self.board);
+                continue;
             }
             self.board.cur_pc = self.cpu.pc;
             self.cpu.step(&mut self.board);

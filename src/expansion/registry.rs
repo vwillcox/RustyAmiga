@@ -221,6 +221,33 @@ pub static BOARDS: &[BoardInfo] = &[
         },
     },
     BoardInfo {
+        id: "uaegfx",
+        name: "UAE virtual graphics card (Picasso96 uaegfx)",
+        maker: "UAE",
+        year: 2000,
+        slot: Slot::Zorro3,
+        options: "mem=SIZE video memory (4M to 256M, default 16M)",
+        build: |o| {
+            let kb = o.size_kb("mem", 16384, &Z3_SIZES[..7])?;
+            Ok(vec![Card {
+                board: "uaegfx",
+                ac: Autoconfig {
+                    zorro3: true,
+                    memory: false,
+                    diag_rom: None,
+                    size: kb * 1024,
+                    manufacturer: crate::rtg::MANUFACTURER,
+                    product: crate::rtg::PRODUCT,
+                    serial: 0,
+                },
+                base: None,
+                state: CardState::Waiting,
+                dev: Device::Ram(vec![0; kb as usize * 1024]),
+            }]
+            .into())
+        },
+    },
+    BoardInfo {
         id: "a501",
         name: "A501 512 KB RAM and clock",
         maker: "Commodore",

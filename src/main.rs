@@ -91,7 +91,8 @@ struct Args {
     #[arg(long)]
     shot_every: Option<u64>,
     /// Headless: type keys at a frame, e.g. "1400:^D" or "1500:say hello\n".
-    /// `^X` is Ctrl+X, `\AX` is Left Amiga+X, `\n` is Return. May be given several times.
+    /// `^X` is Ctrl+X, `\AX` is Left Amiga+X, `\RX` Right Amiga+X, `\n` is Return.
+    /// May be given several times.
     #[arg(long = "type")]
     type_keys: Vec<String>,
     /// Headless: hold joystick buttons for 10 frames, e.g. "1200:fire" or
@@ -366,6 +367,11 @@ fn main() {
         }
         cfg.turbo_floppy = r.turbo_floppy;
         cfg.drives = cfg.drives.max(r.extra_drives + 1);
+        if let Some(bytes) = r.rtg_mem.filter(|_| model.addr32()) {
+            let mb = (bytes >> 20).clamp(4, 256).next_power_of_two();
+            let opts = amiga::expansion::registry::Options(vec![("mem".into(), format!("{mb}M"))]);
+            cfg.boards.push(amiga::config::BoardSpec { id: "uaegfx".into(), opts });
+        }
     }
     if let Some(c) = args.chip {
         cfg.chip_kb = c;
@@ -522,9 +528,9 @@ fn main() {
         }
     }
     if !hdfs.is_empty() && amiga.board.gayle.is_some() {
-        // A600/A1200: the internal IDE port takes a master and a slave.
+        // A600/A1200/A4000: the internal IDE port takes a master and a slave.
         if hdfs.len() > 2 {
-            die("the A600/A1200 IDE port takes at most 2 hard disks");
+            die("the IDE port takes at most 2 hard disks (add a SCSI controller with --board for more)");
         }
         let g = amiga.board.gayle.as_mut().unwrap();
         for (i, (name, data, _ro)) in std::mem::take(&mut hdfs).into_iter().enumerate() {
@@ -760,6 +766,9 @@ fn main() {
         if args.debug_dump {
             let c = &amiga.cpu;
             eprintln!("D: {:08x?}\nA: {:08x?}\nSR={:04x} USP={:08x} SSP={:08x}", c.d, c.a, c.sr(), c.usp(), c.ssp());
+            for t in amiga.exec_tasks() {
+                eprintln!("{t}");
+            }
             if let Some(h) = &amiga.pc_history {
                 let mut uniq: Vec<u32> = h.iter().copied().collect();
                 uniq.sort();

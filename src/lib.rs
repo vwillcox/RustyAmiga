@@ -23,4 +23,5 @@ pub mod ncr710;
 pub mod rom;
 pub mod rp9;
 pub mod rtc;
+pub mod rtg;
 pub mod scsi;

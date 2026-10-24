@@ -27,6 +27,8 @@ pub struct Rp9 {
     pub chip_ram: u32,
     pub turbo_floppy: bool,
     pub extra_drives: usize,
+    /// Video memory of UAE's virtual graphics card (`<peripheral type="synthetic">rtg`).
+    pub rtg_mem: Option<u32>,
     /// Floppy image names in priority order.
     pub floppy_names: Vec<String>,
     /// Floppy images in priority order (only filled by `load`): (name, contents).
@@ -186,6 +188,10 @@ fn parse_manifest(xml: &str) -> Rp9 {
     }
     for (attrs, text) in tag_text(xml, "peripheral") {
         rp.jit |= text == "jit";
+        if text == "rtg" {
+            rp.rtg_mem = attr(attrs, "memory").and_then(|m| m.parse().ok());
+            continue;
+        }
         if text == "fpu" {
             rp.fpu = attr(attrs, "type").map(str::to_string);
             continue;

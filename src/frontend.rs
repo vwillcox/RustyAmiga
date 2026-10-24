@@ -74,6 +74,8 @@ struct App {
     /// emulating since the last adjustment.
     speed_floor: Option<f32>,
     busy: Duration,
+    /// Size of the picture in the pixel buffer (without the LED panel).
+    fb_size: (usize, usize),
 }
 
 /// Frames between adaptive CPU speed adjustments.
@@ -429,7 +431,15 @@ impl App {
 
     fn render(&mut self) {
         let Some(px) = self.pixels.as_mut() else { return };
-        let (fb, _, _) = self.amiga.board.framebuffer();
+        let (fb, w, h) = self.amiga.board.framebuffer();
+        // The graphics card's modes differ in size from the chipset's picture.
+        if (w, h) != self.fb_size {
+            if let Err(e) = px.resize_buffer(w as u32, (h + amiga::panel::PANEL_H) as u32) {
+                log::error!("resize failed: {e}");
+                return;
+            }
+            self.fb_size = (w, h);
+        }
         let frame = px.frame_mut();
         for (dst, src) in frame.chunks_exact_mut(4).zip(fb.iter()) {
             dst.copy_from_slice(&src.to_le_bytes());
@@ -437,7 +447,7 @@ impl App {
         let leds = self.amiga.board.leds();
         // The HD light stays on briefly after each command so short bursts show.
         let hd_active = self.tick.saturating_sub(self.hd_changed) < 8 && self.hd_changed > 0;
-        amiga::panel::draw(frame, FB_W, FB_H, &leds, hd_active, self.tick);
+        amiga::panel::draw(frame, w, h, &leds, hd_active, self.tick);
         if let Err(e) = px.render() {
             log::error!("render failed: {e}");
         }
@@ -626,6 +636,7 @@ pub fn run(mut amiga: Amiga, opts: Options) {
         hd_changed: 0,
         speed_floor,
         busy: Duration::ZERO,
+        fb_size: (FB_W, FB_H),
     };
     let el = EventLoop::new().expect("event loop");
     el.run_app(&mut app).expect("run event loop");

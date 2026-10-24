@@ -80,7 +80,7 @@ Paula also now finishes the current word when a channel's DMA is switched off, t
 ### Host folders as hard disks
 Amiga Forever ships AROS and the enhanced OS 3.X installation as plain folders (`Amiga Files/Shared/dir` on the DVD: `AROS`, `System` and `Work`), which UAE mounts with its own filesystem handler. Put them in `./dir`. When the machine starts, each folder is built into an international FFS (`DOS\3`) partition image in memory (`src/dirfs.rs`), which Kickstart's FFS mounts like any other disk. `--dir-hd FOLDER` does the same for any folder.
 - Writes stay in memory. Names longer than 30 characters are shortened, and host names are converted to Latin-1. There are no Amiga protection bits on the host, so files in S: and text files that start like scripts get the S bit.
-- **Amiga 4000 Enhanced 3.X** boots the 3.X ROM from System with Work as DH1. It first shows "uaegfx.card could not be opened" (no RTG card); after OK (`--type 1000:\Av` headless), Workbench comes up on AGA.
+- **Amiga 4000 Enhanced 3.X** boots the 3.X ROM from System with Work as DH1, to Workbench at 800x600 on the uaegfx card (see RTG below).
 - **AROS** boots from its folder to Wanderer on an A4000 given 16 MB motherboard and 64 MB Zorro III RAM. With the default 4 MB, its stacks ended up in chip RAM, and remapping its true-colour images for AGA took minutes.
 
 ### CD32
@@ -104,6 +104,16 @@ The CD controller (`src/cdtv.rs`, after WinUAE's cdtv.cpp) is the DMAC on the au
 - The bookmark RAM is saved to `~/.config/amiga/nvram/cdtv.nvram` by windowed runs.
 - Front panel and remote: the CD buttons reach the machine as raw keys $72-$77 (stop, play/pause, previous, next, rewind, fast forward), or go straight to the drive while the ROM has it in front-panel mode (drive command $A3), as in WinUAE. The CD32 pad's buttons stand in for them: play is play/pause, reverse/forward are previous/next track, green is stop. So P, [, ], G with the joystick keys on, a gamepad's Start, shoulders and West button, or `--joy 800:play` headless. In the ROM's player these play, skip and stop.
 - Not yet emulated: CD+G subchannel bytes (SBCP), the remote's mouse/joystick mode and the memory card.
+
+### RTG: UAE's graphics card (uaegfx)
+`--board uaegfx[:mem=16M]` (A3000/A4000, 4-256 MB; RP9 `<peripheral>rtg</peripheral>`) adds UAE's virtual Picasso96 card (`src/rtg/`, after WinUAE's picasso96.cpp): a Zorro III board (2011/96) whose space is video RAM.
+- As in modern WinUAE, the driver comes from the emulator. A resident in a 64 KB ROM at `$F00000` builds `uaegfx.card` in memory at boot (Amiga Forever's Devs:Monitors/RTG opens it by name). Its functions are stubs that call the emulator with `jsr $F0FF60` and the function number on the stack.
+- FindCard/InitCard fill in the BoardInfo, with a mode list of UAE's 12 resolutions (320x240 to 1920x1080, display IDs as in WinUAE) in 8-bit CLUT, 16-bit R5G6B5PC and 32-bit B8G8R8A8.
+- SetGC, SetPanning, SetColorArray, SetSwitch and SetDisplay drive the picture, which replaces the chipset's output while the card's screen is in front. The window follows the card's resolution.
+- The hardware sprite (SetSprite/Position/Image/Color) is drawn over the picture; the AF monitor requires one.
+- The blitter functions draw into VRAM: FillRect, InvertRect, BlitRect, BlitRectNoMaskComplete (all 16 minterms), BlitRectTransparent, BlitTemplate, BlitPattern, BlitPlanar2Chunky and BlitPlanar2Direct. Amiga Forever's rtg.library leaves these to the card. Without them, Workbench booted to an empty screen.
+- Tested: Workbench, a Shell and scrolling at 800x600 in 8, 16 and 32 bits. Copying a changed screenmode.prefs (display ID $50041000, $50041100 or $50041303) to ENV:Sys from Execute Command makes IPrefs reopen Workbench in that mode.
+- Not yet: the card's vertical blank interrupt, the video overlay, and 24-bit or other pixel formats in the mode list.
 
 ### 68000 bus timing (Voyage)
 Voyage (Razor 1911) now runs. Its protection needed three timing details:
@@ -143,7 +153,7 @@ On an IDE port the CD-ROM drive is an ATAPI device (`src/gayle.rs`). It answers 
 
 ### Remaining open items
 - **Incision works but precalculates for a long time.** It renders its soundtrack first; at 64x the intro starts by frame 9000.
-- **Not emulated:** PowerPC boards, UAE's RTG card (uaegfx), and the user's own shared folder (`<harddrive root="shared"/>`, which is skipped). The Walker prototype's folders are not on the AF 11 DVD.
+- **Not emulated:** PowerPC boards, real RTG cards, and the user's own shared folder (`<harddrive root="shared"/>`, which is skipped). The Walker prototype's folders are not on the AF 11 DVD.
 - **Not Amiga software:** the Videos and Gallery packages (DVD video and host images for Amiga Forever's player). The emulator now refuses them with that explanation.
 
 ## Known issues and open items

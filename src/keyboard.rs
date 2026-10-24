@@ -81,16 +81,22 @@ pub fn text_to_keys(text: &str) -> Vec<(u8, bool)> {
     const SHIFT: u8 = 0x60;
     const CTRL: u8 = 0x63;
     const LAMIGA: u8 = 0x66;
+    const RAMIGA: u8 = 0x67;
     let mut out = vec![];
     let text = text.replace("\\n", "\n");
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
-        // ^X is Ctrl+X; \\AX is Left Amiga+X (e.g. \\Av answers a requester's OK).
+        // ^X is Ctrl+X; \\AX is Left Amiga+X (e.g. \\Av answers a requester's OK),
+        // \\RX Right Amiga+X (a menu shortcut).
         let modifier = match c {
             '^' => Some(CTRL),
             '\\' if chars.peek() == Some(&'A') => {
                 chars.next();
                 Some(LAMIGA)
+            }
+            '\\' if chars.peek() == Some(&'R') => {
+                chars.next();
+                Some(RAMIGA)
             }
             _ => None,
         };

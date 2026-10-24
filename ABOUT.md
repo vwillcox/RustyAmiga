@@ -12,7 +12,8 @@ RustyAmiga emulates the chips instead, and lets Commodore's ROMs and drivers do 
 A590 hard disk controller is driven by Commodore's boot ROM. The A4091 SCSI card runs its own driver,
 which uploads programs to the SCSI chip. PCMCIA cards are recognized by Kickstart's card.resource.
 That costs more effort, but it means real software sees real hardware, and its own quirks work as
-they did on a real machine.
+they did on a real machine. The one exception is UAE's virtual graphics card, which Amiga Forever's
+OS 3.X system is set up for (see below).
 
 **Test against real software.** The regression suite is the Amiga Forever collection: around 240
 games, demos and system packages in `.rp9` form. Every change is run against all of them with the
@@ -118,6 +119,18 @@ they were still precalculating. Those packages get an adaptive CPU speed in the 
 multiplier rises while the host keeps up and drops when it doesn't. Headless runs use a fixed
 speed, so test results are repeatable.
 
+### A virtual graphics card
+Amiga Forever's enhanced OS 3.X expects UAE's graphics card, uaegfx: Picasso96 opens
+`uaegfx.card` and puts Workbench on an 800x600 screen. That card has never existed as hardware.
+Its driver is built by the emulator, and in modern WinUAE it no longer comes from disk: a ROM
+creates `uaegfx.card` in memory at boot. RustyAmiga does the same. A resident in a small ROM at
+`$F00000` builds the library, and InitCard points the BoardInfo functions at stubs that call the
+emulator. The first version left drawing to Picasso96's own software routines. Workbench then
+booted and sat idle on an empty grey screen, with only a few lines drawn. Amiga Forever's
+rtg.library leaves those routines to the card, so the emulator now does the drawing too: rectangle
+fills, copies with any minterm, text templates, patterns and planar-to-chunky conversion, straight
+into video RAM. Booting got faster as well.
+
 ### Tools built along the way
 - **Instruction tracing:** `TRACE_RANGE`, `BREAK_AT` and `DUMP_MEM` show what software does at a
   given point, with beam position and cycle count.
@@ -130,5 +143,5 @@ speed, so test results are repeatable.
 
 The plan in [docs/ADDONS.md](docs/ADDONS.md) is to offer every Amiga add-on board as a machine
 option, by emulating each chip family once and describing boards as data on top of it. Next are more
-storage controllers (53C9x, 5380, IDE boards), RTG graphics cards, accelerators with the 68060 and
+storage controllers (53C9x, 5380, IDE boards), real RTG graphics cards, accelerators with the 68060 and
 MMU, sound and network cards, and the CD32 FMV module.
