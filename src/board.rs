@@ -145,6 +145,8 @@ pub struct Board {
     disk_synced: bool,
     disk_acc: u32,
     disk_shift: u16,
+    /// Xorshift state for the read line's noise when no drive is spinning.
+    disk_noise: u32,
     disk_bits: u32,
     dskbyt: u16,
     pub drives: Vec<Drive>,
@@ -223,7 +225,7 @@ impl Board {
                 _ => None,
             },
             akiko: (cfg.model == crate::config::Model::Cd32).then(crate::akiko::Akiko::new),
-            rtc: cfg.rtc.map(crate::rtc::Rtc::new),
+            rtc: cfg.rtc.map(|k| crate::rtc::Rtc::new(k, if cfg.ntsc { NTSC_CCK_RATE } else { PAL_CCK_RATE })),
             rom,
             rom_mask,
             ext_rom: vec![],
@@ -277,6 +279,7 @@ impl Board {
             disk_synced: false,
             disk_acc: 0,
             disk_shift: 0,
+            disk_noise: 0x2545_f491,
             disk_bits: 0,
             dskbyt: 0,
             drives,
@@ -598,6 +601,9 @@ impl Board {
         self.hpos = 0;
         self.vpos += 1;
         self.cia_b.tod_tick();
+        if let Some(rtc) = &mut self.rtc {
+            rtc.tick(LINE_CCKS as u32);
+        }
         // Pot counters run while the capacitors charge; nothing analog is attached,
         // so they count to the maximum the hardware reaches within a frame.
         if self.pot_lines < 255 {
@@ -803,10 +809,16 @@ impl Board {
                 }
             }
         }
-        let Some(i) = sel else { return };
+        // With no spinning drive selected the read line only picks up noise, so a
+        // read waiting for sync still finds one by chance and completes with
+        // garbage. Kickstart 1.3's strap reads DF0 even when there is no drive
+        // (a CDTV without its external floppy) and relies on this to move on.
+        if sel.is_none() && !self.disk_dma.as_ref().is_some_and(|d| !d.write) {
+            return;
+        }
 
         let writing = dma_on && self.disk_dma.as_ref().is_some_and(|d| d.write);
-        if writing {
+        if let (Some(i), true) = (sel, writing) {
             let w = self.chip_word(self.dskpt);
             self.dskpt = self.dskpt.wrapping_add(2);
             if self.drives[i].write_word(w) {
@@ -818,7 +830,16 @@ impl Board {
 
         let wordsync = self.adkcon & 0x400 != 0;
         for _ in 0..16 {
-            let (bit, index) = self.drives[i].read_bit();
+            let (bit, index) = match sel {
+                Some(i) => self.drives[i].read_bit(),
+                None => {
+                    let x = &mut self.disk_noise;
+                    *x ^= *x << 13;
+                    *x ^= *x >> 17;
+                    *x ^= *x << 5;
+                    ((*x >> 16) as u16 & 1, false)
+                }
+            };
             if index {
                 self.cia_b.set_icr(ICR_FLAG);
             }

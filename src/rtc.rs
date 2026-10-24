@@ -1,8 +1,10 @@
 //! Battery-backed real-time clocks at $DC0000: the OKI MSM6242B (A2000, A500+,
 //! CDTV, and A501/A601-style trapdoor boards) and the Ricoh RF5C01A (A3000,
 //! A4000). Each register is a nibble in the low four bits of the byte at
-//! $DC0000 + 4n + 3. Time runs from the host clock plus an offset, so setting
-//! the clock from AmigaOS works for the session.
+//! $DC0000 + 4n + 3. The clock starts at the host time on power-on and then
+//! counts emulated time (the chip's own crystal, not the host's), so programs
+//! that time it against the CPU see it tick at the right rate in warp mode.
+//! Setting the clock from AmigaOS works for the session.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -14,7 +16,14 @@ pub enum RtcKind {
 
 pub struct Rtc {
     pub kind: RtcKind,
-    /// Seconds added to the host time.
+    /// Host local time at power-on.
+    base: i64,
+    /// Emulated seconds counted since power-on, and the colour clocks towards
+    /// the next one.
+    elapsed: i64,
+    ccks: u32,
+    cck_rate: u32,
+    /// Seconds added to `base + elapsed` by setting the clock.
     offset: i64,
     /// MSM6242: control registers D, E, F.
     ctl: [u8; 3],
@@ -123,13 +132,32 @@ fn year_of(two_digits: u32) -> i64 {
 }
 
 impl Rtc {
-    pub fn new(kind: RtcKind) -> Self {
+    /// `cck_rate` is the colour clock frequency that `tick` counts in.
+    pub fn new(kind: RtcKind, cck_rate: u32) -> Self {
         // MSM6242 control F: 24-hour mode.
-        Rtc { kind, offset: 0, ctl: [0, 0, 4], mode: 0, h24: true, ram: [0; 26], held: None }
+        Rtc { kind, base: host_local_now(), elapsed: 0, ccks: 0, cck_rate, offset: 0, ctl: [0, 0, 4], mode: 0, h24: true, ram: [0; 26], held: None }
+    }
+
+    /// Advance by `ccks` colour clocks of emulated time.
+    pub fn tick(&mut self, ccks: u32) {
+        // MSM6242 control F bit 1 (STOP) halts the counters.
+        if self.kind == RtcKind::Msm6242 && self.ctl[2] & 2 != 0 {
+            return;
+        }
+        self.ccks += ccks;
+        if self.ccks >= self.cck_rate {
+            self.ccks -= self.cck_rate;
+            self.elapsed += 1;
+        }
+    }
+
+    /// The running time before the user's offset.
+    fn counter(&self) -> i64 {
+        self.base + self.elapsed
     }
 
     fn now(&self) -> i64 {
-        self.held.unwrap_or_else(|| host_local_now() + self.offset)
+        self.held.unwrap_or_else(|| self.counter() + self.offset)
     }
 
     fn tm(&self) -> Tm {
@@ -145,7 +173,7 @@ impl Rtc {
         tm.min = tm.min.min(59);
         tm.sec = tm.sec.min(59);
         let t = from_tm(&tm);
-        self.offset = t - host_local_now();
+        self.offset = t - self.counter();
         if self.held.is_some() {
             self.held = Some(t);
         }
@@ -260,7 +288,7 @@ impl Rtc {
                             self.held = Some(self.now());
                         } else if !hold && self.held.is_some() {
                             let t = self.held.take().unwrap();
-                            self.offset = t - host_local_now();
+                            self.offset = t - self.counter();
                         }
                         self.ctl[0] = v as u8;
                         return;
@@ -270,6 +298,10 @@ impl Rtc {
                         return;
                     }
                     _ => {
+                        // REST (bit 0) clears the sub-second divider.
+                        if v & 1 != 0 {
+                            self.ccks = 0;
+                        }
                         self.ctl[2] = v as u8;
                         return;
                     }
@@ -328,7 +360,7 @@ mod tests {
     #[test]
     fn setting_the_clock_sticks() {
         for kind in [RtcKind::Msm6242, RtcKind::Rf5c01] {
-            let mut r = Rtc::new(kind);
+            let mut r = Rtc::new(kind, crate::board::PAL_CCK_RATE);
             // Write 1994-12-25 as battclock.resource would (year, month, day).
             let (y10, y1, mo10, mo1, d10, d1) = match kind {
                 RtcKind::Msm6242 => (11, 10, 9, 8, 7, 6),
@@ -341,5 +373,22 @@ mod tests {
             assert_eq!((tm.year, tm.month, tm.day), (1994, 12, 25), "{kind:?}");
             assert_eq!((r.read(y10), r.read(y1)), (9, 4));
         }
+    }
+
+    #[test]
+    fn counts_emulated_seconds() {
+        let rate = crate::board::PAL_CCK_RATE;
+        let mut r = Rtc::new(RtcKind::Msm6242, rate);
+        let t0 = r.now();
+        for _ in 0..3 {
+            r.tick(rate / 2 + 1);
+        }
+        assert_eq!(r.now(), t0 + 1);
+        r.tick(rate / 2 + 1);
+        assert_eq!(r.now(), t0 + 2);
+        // STOP holds the time still.
+        r.write(15, 4 | 2);
+        r.tick(rate * 5);
+        assert_eq!(r.now(), t0 + 2);
     }
 }

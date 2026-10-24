@@ -130,7 +130,8 @@ impl Config {
             cpu_speed_adaptive: false,
             ntsc: false,
             turbo_floppy: false,
-            drives: 1,
+            // The CD32 and CDTV have no internal floppy drive.
+            drives: if matches!(model, Model::Cd32 | Model::Cdtv) { 0 } else { 1 },
         }
     }
 }

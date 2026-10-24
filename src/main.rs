@@ -60,7 +60,8 @@ struct Args {
     z3: Option<u32>,
     #[arg(long)]
     ntsc: bool,
-    /// Number of floppy drives (1-4).
+    /// Number of floppy drives (0-4; the CD32 and CDTV default to none, and a
+    /// DF0 image adds the CDTV's external drive).
     #[arg(long)]
     drives: Option<usize>,
     /// Stereo separation 0.0 (mono) to 1.0 (hard-panned, like real hardware).
@@ -445,7 +446,10 @@ fn main() {
     cfg.ntsc = args.ntsc;
     cfg.turbo_floppy |= args.turbo_floppy;
     if let Some(d) = args.drives {
-        cfg.drives = d.clamp(1, 4);
+        cfg.drives = d.min(4);
+    }
+    if args.df0.is_some() {
+        cfg.drives = cfg.drives.max(1);
     }
     let extra = [&args.df1, &args.df2, &args.df3];
     if let Some(i) = extra.iter().rposition(|d| d.is_some()) {
