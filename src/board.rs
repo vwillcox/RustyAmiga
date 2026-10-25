@@ -169,6 +169,9 @@ pub struct Board {
     pub mouse_right: bool,
     /// Joystick in port 2: up, down, left, right, fire, fire2.
     pub joy: [bool; 6],
+    /// A joystick in port 1 instead of the mouse, and its state (as `joy`).
+    pub port1_joystick: bool,
+    pub joy1: [bool; 6],
     /// CD32 joypad's other buttons: play, reverse, forward, green, yellow
     /// (red and blue are fire and fire2).
     pub pad: [bool; 5],
@@ -301,6 +304,8 @@ impl Board {
             mouse_y: 0,
             mouse_left: false,
             mouse_right: false,
+            port1_joystick: false,
+            joy1: [false; 6],
             joy: [false; 6],
             pad: [false; 5],
             pad_prev: [false; 5],
@@ -990,7 +995,7 @@ impl Board {
         if self.joy[4] {
             v &= !0x80;
         }
-        if self.mouse_left {
+        if self.mouse_left || self.port1_joystick && self.joy1[4] {
             v &= !0x40;
         }
         for d in self.drives.iter().filter(|d| d.selected && d.present) {
@@ -1162,24 +1167,9 @@ impl Board {
             }
             0x006 => (self.vpos & 0xff) << 8 | (self.hpos & 0xff),
             0x008 => 0,
+            0x00a if self.port1_joystick => joy_dat(self.joy1),
             0x00a => (self.mouse_y as u16) << 8 | self.mouse_x as u16,
-            0x00c => {
-                let [up, down, left, right, ..] = self.joy;
-                let mut v = 0u16;
-                if right {
-                    v |= 2;
-                }
-                if left {
-                    v |= 0x200;
-                }
-                if down ^ right {
-                    v |= 1;
-                }
-                if up ^ left {
-                    v |= 0x100;
-                }
-                v
-            }
+            0x00c => joy_dat(self.joy),
             0x00e => self.denise.read_clxdat(),
             0x010 => self.adkcon,
             0x012 => self.pot[0],
@@ -1192,7 +1182,7 @@ impl Board {
                         v &= !dat;
                     }
                 }
-                if self.mouse_right {
+                if self.mouse_right || self.port1_joystick && self.joy1[5] {
                     v &= !0x0400;
                 }
                 if self.pad_serial() {
@@ -1720,6 +1710,26 @@ impl Board {
             }
         }
     }
+}
+
+/// JOYxDAT for a joystick (up, down, left, right): the direction switches
+/// drive the mouse counter inputs.
+fn joy_dat(j: [bool; 6]) -> u16 {
+    let [up, down, left, right, ..] = j;
+    let mut v = 0u16;
+    if right {
+        v |= 2;
+    }
+    if left {
+        v |= 0x200;
+    }
+    if down ^ right {
+        v |= 1;
+    }
+    if up ^ left {
+        v |= 0x100;
+    }
+    v
 }
 
 /// The autoconfig chain a configuration asks for: the generic fast RAM sizes

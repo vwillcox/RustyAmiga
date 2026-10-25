@@ -2,10 +2,11 @@
 //! presets or by hand, or browse RP9 titles with their recommended setup.
 //! The emulator itself runs as a child process of this same executable.
 
+use crate::input::{self, Action, InputMap, JoyButton, PadInput};
 use amiga::config::Model;
 use eframe::egui;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -290,6 +291,7 @@ fn config_path() -> Option<PathBuf> {
 enum Tab {
     Machine,
     Games,
+    Controls,
     Log,
 }
 
@@ -309,6 +311,15 @@ struct App {
     preview: Option<(usize, Option<egui::TextureHandle>)>,
     log: Arc<Mutex<Vec<String>>>,
     running: Arc<Mutex<u32>>,
+    /// Boards dropped by the last model change.
+    board_notice: Option<String>,
+    /// Controller mapping (shared with the emulator through its own file).
+    input: InputMap,
+    /// The keyboard binding waiting for a key press: port and button.
+    capture: Option<(u8, JoyButton)>,
+    gilrs: Option<gilrs::Gilrs>,
+    /// Gamepad inputs held right now, to show which row is which button.
+    pad_held: HashSet<PadInput>,
 }
 
 fn default_rom_dirs(extra: &Option<PathBuf>) -> Vec<PathBuf> {
@@ -362,7 +373,13 @@ impl App {
             preview: None,
             log: Arc::new(Mutex::new(vec![])),
             running: Arc::new(Mutex::new(0)),
+            board_notice: None,
+            input: InputMap::load(),
+            capture: None,
+            gilrs: gilrs::Gilrs::new().ok(),
+            pad_held: HashSet::new(),
         };
+        Self::prune_boards(&mut app.machine);
         if app.machine.rom.is_none() {
             app.apply_preset(&PRESETS[0]);
         }
@@ -435,6 +452,8 @@ impl App {
 
     fn launch(&mut self, m: &Machine, media: Option<&Path>) {
         let Ok(exe) = std::env::current_exe() else { return };
+        let mut m = m.clone();
+        Self::prune_boards(&mut m);
         let mut cmd = std::process::Command::new(exe);
         if let Some(p) = media {
             cmd.arg(p);
@@ -468,6 +487,8 @@ impl App {
         if let Some(c) = &m.cd {
             cmd.arg("--cd").arg(c);
         }
+        // The emulator reads the controller mapping when it starts.
+        self.input.save();
         cmd.stderr(std::process::Stdio::piped()).stdout(std::process::Stdio::piped());
         let desc = format!("{cmd:?}");
         self.log.lock().unwrap().push(format!("$ {desc}"));
@@ -551,7 +572,7 @@ impl App {
             .on_hover_text("Trapdoor / ranger memory (e.g. the A501 512K expansion)");
             ui.end_row();
 
-            ui.label("Fast RAM (Zorro II)");
+            ui.label(if m.model.addr32() { "Fast RAM (motherboard)" } else { "Fast RAM (Zorro II)" });
             egui::ComboBox::from_id_salt(format!("{id}-fast")).selected_text(kb(m.fast_kb)).show_ui(ui, |ui| {
                 for v in [0, 512, 1024, 2048, 4096, 8192] {
                     ui.selectable_value(&mut m.fast_kb, v, kb(v));
@@ -586,6 +607,26 @@ impl App {
         });
     }
 
+    /// Drop boards the model cannot take (after a model change, or from old
+    /// settings), returning their names.
+    fn prune_boards(m: &mut Machine) -> Vec<&'static str> {
+        use amiga::expansion::registry;
+        let mut fitted = vec![];
+        let mut removed = vec![];
+        m.boards.retain(|(id, _)| match registry::find(id) {
+            Some(info) if info.cannot_add(m.model, &fitted).is_none() => {
+                fitted.push(info);
+                true
+            }
+            Some(info) => {
+                removed.push(info.name);
+                false
+            }
+            None => false,
+        });
+        removed
+    }
+
     /// Add-on boards: the ones fitted, and the ones that fit this model.
     fn expansion_editor(ui: &mut egui::Ui, m: &mut Machine) {
         use amiga::expansion::registry::{self, Options, BOARDS};
@@ -595,12 +636,7 @@ impl App {
                 let Some(info) = registry::find(id) else { continue };
                 ui.label(info.name).on_hover_text(format!("{}, {}; {}", info.maker, info.year, info.slot.describe()));
                 ui.add(egui::TextEdit::singleline(opts).desired_width(140.0).hint_text("options")).on_hover_text(info.options);
-                let problem = if !info.slot.fits(m.model) {
-                    Some(format!("does not fit the {}", model_name(m.model)))
-                } else {
-                    Options::parse(opts).and_then(|o| info.build(&o)).err()
-                };
-                match problem {
+                match Options::parse(opts).and_then(|o| info.build(&o)).err() {
                     Some(e) => ui.colored_label(egui::Color32::LIGHT_RED, e),
                     None => ui.label(""),
                 };
@@ -613,13 +649,29 @@ impl App {
         if let Some(i) = remove {
             m.boards.remove(i);
         }
+        let fitted: Vec<_> = m.boards.iter().filter_map(|(id, _)| registry::find(id)).collect();
+        let mut add = None;
         egui::ComboBox::from_id_salt("add-board").width(320.0).selected_text("Add board…").show_ui(ui, |ui| {
-            for b in BOARDS.iter().filter(|b| b.slot.fits(m.model)) {
-                if ui.selectable_label(false, format!("{} ({})", b.name, b.maker)).on_hover_text(b.options).clicked() {
-                    m.boards.push((b.id.to_string(), String::new()));
+            // Boards for other models are not offered; ones that fit the model
+            // but not next to what is fitted are shown greyed out with the reason.
+            for b in BOARDS.iter().filter(|b| b.misfit(m.model).is_none()) {
+                let why = b.cannot_add(m.model, &fitted);
+                let r = ui
+                    .add_enabled(why.is_none(), egui::SelectableLabel::new(false, format!("{} ({})", b.name, b.maker)))
+                    .on_hover_text(format!("{}; options: {}", b.slot.describe(), b.options));
+                let r = match &why {
+                    Some(w) => r.on_disabled_hover_text(w),
+                    None => r,
+                };
+                if r.clicked() {
+                    add = Some(b.id);
                 }
             }
         });
+        if let Some(id) = add {
+            m.boards.push((id.to_string(), String::new()));
+        }
+        ui.label(egui::RichText::new(format!("Only boards that fit the {} are offered.", model_name(m.model))).weak());
     }
 
     fn floppy_editor(ui: &mut egui::Ui, m: &mut Machine) {
@@ -698,9 +750,19 @@ impl App {
         }
         ui.separator();
         ui.heading("Configuration");
+        let model = self.machine.model;
         Self::machine_editor(ui, &mut self.machine, &self.roms, "main");
+        let removed = Self::prune_boards(&mut self.machine);
+        if !removed.is_empty() {
+            self.board_notice = Some(format!("Removed {}: not for the {}.", removed.join(", "), model_name(self.machine.model)));
+        } else if model != self.machine.model {
+            self.board_notice = None;
+        }
         ui.separator();
         ui.heading("Expansion boards");
+        if let Some(n) = &self.board_notice {
+            ui.colored_label(egui::Color32::from_rgb(230, 170, 50), n);
+        }
         Self::expansion_editor(ui, &mut self.machine);
         ui.separator();
         ui.heading("Floppy disks");
@@ -809,6 +871,232 @@ impl App {
     }
 }
 
+impl App {
+    fn controls_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let before = self.input.clone();
+        self.poll_pads();
+        self.capture_key(ctx);
+
+        ui.heading("Ports");
+        egui::Grid::new("ports").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+            ui.label("Port 1 (mouse port)");
+            ui.horizontal(|ui| {
+                ui.radio_value(&mut self.input.port1_joystick, false, "Mouse");
+                ui.radio_value(&mut self.input.port1_joystick, true, "Joystick")
+                    .on_hover_text("For two-player games. The mouse does nothing while a joystick is in port 1.");
+            });
+            ui.end_row();
+            ui.label("Port 2 (joystick port)");
+            ui.label("Joystick, or the CD32 pad on a CD32");
+            ui.end_row();
+        });
+
+        ui.separator();
+        ui.heading("Keyboard");
+        ui.checkbox(&mut self.input.keys_on_at_start, "Keyboard joystick on from the start");
+        ui.label(egui::RichText::new("Home switches the keyboard joystick on and off in the emulator. While it is on, these keys work the joysticks instead of typing. Click Press… and then the key, or pick it from the list (modifier keys such as Right Ctrl are only in the list).").weak());
+        ui.add_space(4.0);
+        egui::Grid::new("key-bindings").num_columns(3).spacing([16.0, 4.0]).striped(true).show(ui, |ui| {
+            ui.strong("Control");
+            ui.strong("Port 2");
+            ui.strong("Port 1");
+            ui.end_row();
+            for b in JoyButton::ALL {
+                ui.label(b.label());
+                self.key_cell(ui, 2, b);
+                if b.cd32() {
+                    ui.label(egui::RichText::new("CD32 pad: port 2 only").weak());
+                } else {
+                    ui.add_enabled_ui(self.input.port1_joystick, |ui| self.key_cell(ui, 1, b))
+                        .response
+                        .on_disabled_hover_text("Choose a joystick for port 1 above first");
+                }
+                ui.end_row();
+            }
+        });
+        if ui.button("Default keys").clicked() {
+            self.input.keys = InputMap::default().keys;
+            self.capture = None;
+        }
+
+        ui.separator();
+        ui.heading("Gamepads");
+        let names: Vec<String> = self.gilrs.iter().flat_map(|g| g.gamepads()).map(|(_, p)| p.name().to_string()).collect();
+        egui::Grid::new("pads").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+            for i in 0..2 {
+                let name = names.get(i).map_or("not connected".to_string(), |n| n.clone());
+                ui.label(format!("Gamepad {}: {name}", i + 1));
+                ui.horizontal(|ui| {
+                    ui.label("drives");
+                    ui.radio_value(&mut self.input.pad_ports[i], 2, "port 2");
+                    ui.radio_value(&mut self.input.pad_ports[i], 1, "port 1");
+                });
+                ui.end_row();
+            }
+        });
+        if !self.input.port1_joystick && (0..names.len().min(2)).any(|i| self.input.pad_ports[i] == 1) {
+            ui.colored_label(egui::Color32::from_rgb(230, 170, 50), "Port 1 has the mouse, so a gamepad on port 1 does nothing until you choose a joystick for it.");
+        }
+        ui.label(egui::RichText::new("Press a button or move a stick on a gamepad to light up its row. Each input can work a joystick button or direction, a CD32 pad button, or press an Amiga key.").weak());
+        ui.add_space(4.0);
+        egui::Grid::new("pad-bindings").num_columns(3).spacing([16.0, 4.0]).striped(true).show(ui, |ui| {
+            ui.strong("");
+            ui.strong("Gamepad input");
+            ui.strong("Amiga control");
+            ui.end_row();
+            for p in PadInput::ALL {
+                let held = self.pad_held.contains(&p);
+                let dot = egui::RichText::new("●").color(if held { egui::Color32::from_rgb(80, 200, 120) } else { egui::Color32::DARK_GRAY });
+                ui.label(dot);
+                ui.label(if held { egui::RichText::new(p.label()).strong() } else { egui::RichText::new(p.label()) });
+                let cur = self.input.pad_action(p);
+                let mut sel = cur;
+                egui::ComboBox::from_id_salt(("pad", p as usize))
+                    .width(240.0)
+                    .selected_text(cur.map_or("—".to_string(), Action::label))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut sel, None, "— (nothing)");
+                        for b in JoyButton::ALL {
+                            ui.selectable_value(&mut sel, Some(Action::Joy(b)), Action::Joy(b).label());
+                        }
+                        ui.separator();
+                        for (k, _) in input::AMIGA_KEYS {
+                            ui.selectable_value(&mut sel, Some(Action::Key(*k)), Action::Key(*k).label());
+                        }
+                    });
+                if sel != cur {
+                    self.input.set_pad(p, sel);
+                }
+                ui.end_row();
+            }
+        });
+        if ui.button("Default gamepad layout").clicked() {
+            self.input.pad = InputMap::default().pad;
+            self.input.pad_ports = InputMap::default().pad_ports;
+        }
+        ui.label(egui::RichText::new("Changes are saved straight away and used by the next emulator you start.").weak());
+
+        if self.input != before {
+            self.input.save();
+        }
+        // Keep the gamepad lights live.
+        ctx.request_repaint_after(std::time::Duration::from_millis(50));
+    }
+
+    /// A key selector for one joystick button in one port.
+    fn key_cell(&mut self, ui: &mut egui::Ui, port: u8, b: JoyButton) {
+        ui.horizontal(|ui| {
+            let cur = self.input.key_for(port, b).map(str::to_string);
+            let mut sel = cur.clone();
+            egui::ComboBox::from_id_salt(("key", port, b as usize))
+                .width(150.0)
+                .selected_text(cur.as_deref().map_or("—", input::key_label))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut sel, None, "— (none)");
+                    for (k, label) in input::HOST_KEYS {
+                        ui.selectable_value(&mut sel, Some(input::key_name(*k)), *label);
+                    }
+                });
+            if sel != cur {
+                self.input.set_key(port, b, sel.as_deref());
+            }
+            if self.capture == Some((port, b)) {
+                if ui.button("Press a key… (click to cancel)").clicked() {
+                    self.capture = None;
+                }
+            } else if ui.small_button("Press…").clicked() {
+                self.capture = Some((port, b));
+            }
+        });
+    }
+
+    /// Bind the next key pressed to the button waiting for one.
+    fn capture_key(&mut self, ctx: &egui::Context) {
+        let Some((port, b)) = self.capture else { return };
+        let pressed = ctx.input(|i| {
+            i.events.iter().find_map(|e| match e {
+                egui::Event::Key { key, physical_key, pressed: true, .. } => Some(physical_key.unwrap_or(*key)),
+                _ => None,
+            })
+        });
+        if let Some(k) = pressed.and_then(egui_key) {
+            self.input.set_key(port, b, Some(&input::key_name(k)));
+            self.capture = None;
+        }
+    }
+
+    fn poll_pads(&mut self) {
+        let Some(g) = self.gilrs.as_mut() else { return };
+        while let Some(ev) = g.next_event() {
+            match ev.event {
+                gilrs::EventType::ButtonPressed(b, _) | gilrs::EventType::ButtonReleased(b, _) => {
+                    if let Some(p) = PadInput::from_button(b) {
+                        if matches!(ev.event, gilrs::EventType::ButtonPressed(..)) {
+                            self.pad_held.insert(p);
+                        } else {
+                            self.pad_held.remove(&p);
+                        }
+                    }
+                }
+                gilrs::EventType::AxisChanged(a, v, _) => {
+                    if let Some((neg, pos)) = PadInput::from_axis(a) {
+                        for (p, on) in [(neg, v < -input::STICK_THRESHOLD), (pos, v > input::STICK_THRESHOLD)] {
+                            if on {
+                                self.pad_held.insert(p);
+                            } else {
+                                self.pad_held.remove(&p);
+                            }
+                        }
+                    }
+                }
+                gilrs::EventType::Disconnected => self.pad_held.clear(),
+                _ => {}
+            }
+        }
+    }
+}
+
+/// The host key for an egui key event, if it can be bound.
+fn egui_key(k: egui::Key) -> Option<winit::keyboard::KeyCode> {
+    use egui::Key as E;
+    use winit::keyboard::KeyCode as K;
+    let letters = [
+        K::KeyA, K::KeyB, K::KeyC, K::KeyD, K::KeyE, K::KeyF, K::KeyG, K::KeyH, K::KeyI, K::KeyJ, K::KeyK, K::KeyL, K::KeyM,
+        K::KeyN, K::KeyO, K::KeyP, K::KeyQ, K::KeyR, K::KeyS, K::KeyT, K::KeyU, K::KeyV, K::KeyW, K::KeyX, K::KeyY, K::KeyZ,
+    ];
+    let digits = [K::Digit0, K::Digit1, K::Digit2, K::Digit3, K::Digit4, K::Digit5, K::Digit6, K::Digit7, K::Digit8, K::Digit9];
+    let fkeys = [K::F1, K::F2, K::F3, K::F4, K::F5, K::F6, K::F7, K::F8, K::F9, K::F10];
+    let name = format!("{k:?}");
+    let code = match k {
+        E::ArrowDown => K::ArrowDown,
+        E::ArrowLeft => K::ArrowLeft,
+        E::ArrowRight => K::ArrowRight,
+        E::ArrowUp => K::ArrowUp,
+        E::Escape => K::Escape,
+        E::Tab => K::Tab,
+        E::Backspace => K::Backspace,
+        E::Enter => K::Enter,
+        E::Space => K::Space,
+        E::Delete => K::Delete,
+        E::Comma => K::Comma,
+        E::Backslash => K::Backslash,
+        E::Slash => K::Slash,
+        E::OpenBracket => K::BracketLeft,
+        E::CloseBracket => K::BracketRight,
+        E::Backtick => K::Backquote,
+        E::Minus => K::Minus,
+        E::Period => K::Period,
+        E::Equals => K::Equal,
+        E::Semicolon => K::Semicolon,
+        E::Quote => K::Quote,
+        _ if name.len() == 1 && name.as_bytes()[0].is_ascii_uppercase() => letters[(name.as_bytes()[0] - b'A') as usize],
+        _ if name.len() == 4 && name.starts_with("Num") => digits[(name.as_bytes()[3] - b'0') as usize],
+        _ if name.starts_with('F') && name[1..].parse::<usize>().is_ok_and(|n| (1..=10).contains(&n)) => fkeys[name[1..].parse::<usize>().unwrap() - 1],
+        _ => return None,
+    };
+    Some(code)
+}
+
 fn kb(v: u32) -> String {
     match v {
         0 => "None".into(),
@@ -842,6 +1130,7 @@ impl eframe::App for App {
                 ui.separator();
                 ui.selectable_value(&mut self.tab, Tab::Machine, "Machine");
                 ui.selectable_value(&mut self.tab, Tab::Games, format!("Games & Demos ({})", self.titles.len()));
+                ui.selectable_value(&mut self.tab, Tab::Controls, "Controls");
                 ui.selectable_value(&mut self.tab, Tab::Log, "Log");
                 let n = *self.running.lock().unwrap();
                 if n > 0 {
@@ -860,7 +1149,7 @@ impl eframe::App for App {
                         self.save_settings();
                     }
                 }
-                ui.label(egui::RichText::new("In the emulator: click to capture mouse, F12 release, F11 fullscreen, End warp, Home joystick keys (CD32 pad: P [ ] G Y), PageDown next disk").weak());
+                ui.label(egui::RichText::new("In the emulator: click to capture mouse, F12 release, F11 fullscreen, End warp, Home keyboard joystick, PageDown next disk").weak());
             });
         });
         egui::CentralPanel::default().show(ctx, |ui| match self.tab {
@@ -868,6 +1157,9 @@ impl eframe::App for App {
                 egui::ScrollArea::vertical().show(ui, |ui| self.machine_tab(ui));
             }
             Tab::Games => self.games_tab(ui, ctx),
+            Tab::Controls => {
+                egui::ScrollArea::vertical().show(ui, |ui| self.controls_tab(ui, ctx));
+            }
             Tab::Log => {
                 egui::ScrollArea::vertical().stick_to_bottom(true).show(ui, |ui| {
                     for l in self.log.lock().unwrap().iter() {
@@ -883,6 +1175,7 @@ impl eframe::App for App {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.save_settings();
+        self.input.save();
     }
 }
 

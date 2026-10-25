@@ -1,4 +1,5 @@
 mod frontend;
+mod input;
 mod launcher;
 
 use amiga::board::Amiga;
@@ -87,6 +88,10 @@ struct Args {
     /// Headless: draw the front-panel activity lights under screenshots.
     #[arg(long)]
     leds: bool,
+    /// Start the battery-backed clock at this local time ("YYYY-MM-DD HH:MM:SS")
+    /// instead of the host's, so that runs are repeatable.
+    #[arg(long, value_parser = parse_clock)]
+    clock: Option<i64>,
     /// In headless mode, also save a screenshot every N frames (name_NNNNN.png).
     #[arg(long)]
     shot_every: Option<u64>,
@@ -158,6 +163,10 @@ fn write_wav(path: &PathBuf, samples: &[f32], rate: u32) -> std::io::Result<()> 
         f.write_all(&((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes())?;
     }
     Ok(())
+}
+
+fn parse_clock(s: &str) -> Result<i64, String> {
+    amiga::rtc::parse_time(s).ok_or_else(|| format!("{s}: expected YYYY-MM-DD HH:MM:SS"))
 }
 
 /// Save the current picture, optionally with the activity-light panel below it.
@@ -389,11 +398,13 @@ fn main() {
     if let Some(z) = args.z3 {
         cfg.z3_kb = z;
     }
+    let mut fitted = vec![];
     for spec in &args.boards {
         let (info, opts) = amiga::expansion::registry::parse_spec(spec).unwrap_or_else(|e| die(e));
-        if !info.slot.fits(model) {
-            die(format!("{} does not fit the {model:?}", info.name));
+        if let Some(why) = info.cannot_add(model, &fitted) {
+            die(format!("cannot add the {} to the {model:?}: {why}", info.name));
         }
+        fitted.push(info);
         let parts = info.build(&opts).unwrap_or_else(|e| die(format!("{}: {e}", info.id)));
         // Trapdoor boards change the machine's own RAM and add a clock.
         if let Some(kb) = parts.slow_kb {
@@ -508,6 +519,9 @@ fn main() {
     }
 
     let mut amiga = Amiga::new(cfg, rom.data);
+    if let (Some(t), Some(rtc)) = (args.clock, amiga.board.rtc.as_mut()) {
+        rtc.set_start(t);
+    }
     // I/O boards on the chain need their boot ROMs.
     for d in amiga.board.exp.io() {
         if !d.has_rom() && !d.rom_files().is_empty() {
@@ -816,5 +830,5 @@ fn main() {
         }
         path
     });
-    frontend::run(amiga, frontend::Options { swap_disks: floppies, write_protect: args.write_protect, nvram });
+    frontend::run(amiga, frontend::Options { swap_disks: floppies, write_protect: args.write_protect, nvram, input: input::InputMap::load() });
 }

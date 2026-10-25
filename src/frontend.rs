@@ -1,10 +1,11 @@
 //! Windowed frontend: winit + pixels for video, cpal for audio, gilrs for gamepads.
 
-use amiga::board::Amiga;
+use crate::input::{key_by_name, Action, InputMap, JoyButton, PadInput, STICK_THRESHOLD};
+use amiga::board::{Amiga, Board};
 use amiga::chipset::denise::{FB_H, FB_W};
 use amiga::floppy::Disk;
 use pixels::{Pixels, SurfaceTexture};
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -48,6 +49,107 @@ pub struct Options {
     pub write_protect: bool,
     /// Where the machine's NVRAM is saved on exit.
     pub nvram: Option<std::path::PathBuf>,
+    pub input: InputMap,
+}
+
+/// Turns held host keys and gamepad inputs into Amiga joystick, CD32 pad and
+/// key presses through the user's mapping. A control is down while any input
+/// bound to it is held.
+struct Mapper {
+    map: InputMap,
+    keys: HashMap<KeyCode, (u8, JoyButton)>,
+    held_keys: HashSet<KeyCode>,
+    /// Gamepads by slot (first connected is slot 0), and their held inputs.
+    slots: Vec<Option<gilrs::GamepadId>>,
+    held_pad: HashSet<(usize, PadInput)>,
+    /// Amiga keys the gamepads hold down.
+    pad_keys: HashSet<u8>,
+}
+
+impl Mapper {
+    fn new(map: InputMap) -> Mapper {
+        let keys = map.keys.iter().filter_map(|b| Some((key_by_name(&b.key)?, (b.port, b.button)))).collect();
+        Mapper { map, keys, held_keys: HashSet::new(), slots: vec![], held_pad: HashSet::new(), pad_keys: HashSet::new() }
+    }
+
+    fn bound(&self, k: KeyCode) -> bool {
+        self.keys.contains_key(&k)
+    }
+
+    fn key(&mut self, k: KeyCode, down: bool) {
+        if down {
+            self.held_keys.insert(k);
+        } else {
+            self.held_keys.remove(&k);
+        }
+    }
+
+    fn slot(&mut self, id: gilrs::GamepadId) -> usize {
+        if let Some(i) = self.slots.iter().position(|s| *s == Some(id)) {
+            return i;
+        }
+        match self.slots.iter().position(Option::is_none) {
+            Some(i) => {
+                self.slots[i] = Some(id);
+                i
+            }
+            None => {
+                self.slots.push(Some(id));
+                self.slots.len() - 1
+            }
+        }
+    }
+
+    fn disconnect(&mut self, id: gilrs::GamepadId) {
+        if let Some(i) = self.slots.iter().position(|s| *s == Some(id)) {
+            self.slots[i] = None;
+            self.held_pad.retain(|(s, _)| *s != i);
+        }
+    }
+
+    fn pad(&mut self, slot: usize, input: PadInput, down: bool) {
+        if down {
+            self.held_pad.insert((slot, input));
+        } else {
+            self.held_pad.remove(&(slot, input));
+        }
+    }
+
+    fn apply(&mut self, board: &mut Board) {
+        let mut joy = [[false; 6]; 2];
+        let mut cd32 = [false; 5];
+        let mut press = |port: u8, b: JoyButton| {
+            if !b.cd32() {
+                joy[(port == 2) as usize][b as usize] = true;
+            } else if port == 2 {
+                cd32[b as usize - JoyButton::Play as usize] = true;
+            }
+        };
+        for k in &self.held_keys {
+            if let Some(&(port, b)) = self.keys.get(k) {
+                press(port, b);
+            }
+        }
+        let mut amiga_keys = HashSet::new();
+        for &(slot, input) in &self.held_pad {
+            match self.map.pad_action(input) {
+                Some(Action::Joy(b)) => press(self.map.pad_ports[slot.min(1)], b),
+                Some(Action::Key(k)) => {
+                    amiga_keys.insert(k);
+                }
+                None => {}
+            }
+        }
+        [board.joy1, board.joy] = joy;
+        board.pad = cd32;
+        for &k in amiga_keys.difference(&self.pad_keys) {
+            board.keyboard.key(k, true);
+        }
+        for &k in self.pad_keys.difference(&amiga_keys) {
+            board.keyboard.key(k, false);
+        }
+        self.pad_keys = amiga_keys;
+    }
 }
 
 struct App {
@@ -63,6 +165,7 @@ struct App {
     swap_index: usize,
     audio: Option<(cpal::Stream, AudioBuf, u32)>,
     gilrs: Option<gilrs::Gilrs>,
+    input: Mapper,
     fps_count: u32,
     fps_time: Instant,
     /// Frame counter for blinking the activity lights.
@@ -88,8 +191,9 @@ const HELP: &str = "\
 Host keys:
   click window  capture mouse        F12        release mouse
   F11           toggle fullscreen    End        toggle warp speed
-  Home          joystick on cursor keys (Right Ctrl = fire, Right Alt = fire 2;
-                CD32 pad: P play, [ ] reverse/forward, G green, Y yellow)
+  Home          keyboard joystick on/off (keys and gamepad buttons are set in
+                the launcher's Controls tab; by default cursor keys, Right Ctrl
+                fire, Right Alt fire 2, CD32 pad P [ ] G Y)
   PageDown      next disk in swap list into DF0
   PageUp        hard reset           Insert     Amiga HELP key
   Pause         drive noises on/off
@@ -281,7 +385,7 @@ impl App {
                 t.push_str(" [mouse captured: F12 releases]");
             }
             if self.joy_keys {
-                t.push_str(" [cursor keys = joystick]");
+                t.push_str(" [keyboard joystick]");
             }
             if self.warp {
                 t.push_str(" [warp]");
@@ -307,65 +411,31 @@ impl App {
         }
     }
 
-    fn joystick_key(&mut self, k: KeyCode, down: bool) -> bool {
-        if !self.joy_keys {
-            return false;
-        }
-        let b = &mut self.amiga.board;
-        let button = match k {
-            KeyCode::ArrowUp => &mut b.joy[0],
-            KeyCode::ArrowDown => &mut b.joy[1],
-            KeyCode::ArrowLeft => &mut b.joy[2],
-            KeyCode::ArrowRight => &mut b.joy[3],
-            KeyCode::ControlRight => &mut b.joy[4],
-            KeyCode::AltRight => &mut b.joy[5],
-            KeyCode::KeyP => &mut b.pad[0],
-            KeyCode::BracketLeft => &mut b.pad[1],
-            KeyCode::BracketRight => &mut b.pad[2],
-            KeyCode::KeyG => &mut b.pad[3],
-            KeyCode::KeyY => &mut b.pad[4],
-            _ => return false,
-        };
-        *button = down;
-        true
-    }
-
     fn poll_gamepads(&mut self) {
-        use gilrs::{Axis, Button, EventType};
+        use gilrs::EventType;
         let Some(g) = self.gilrs.as_mut() else { return };
+        let mut changed = false;
         while let Some(ev) = g.next_event() {
-            let board = &mut self.amiga.board;
-            let (joy, pad) = (&mut board.joy, &mut board.pad);
+            let slot = self.input.slot(ev.id);
             match ev.event {
                 EventType::ButtonPressed(b, _) | EventType::ButtonReleased(b, _) => {
-                    let down = matches!(ev.event, EventType::ButtonPressed(..));
-                    match b {
-                        Button::DPadUp => joy[0] = down,
-                        Button::DPadDown => joy[1] = down,
-                        Button::DPadLeft => joy[2] = down,
-                        Button::DPadRight => joy[3] = down,
-                        // Laid out like the CD32 pad: red, blue, green, yellow,
-                        // shoulders reverse/forward, Start play.
-                        Button::South | Button::RightTrigger2 => joy[4] = down,
-                        Button::East => joy[5] = down,
-                        Button::West => pad[3] = down,
-                        Button::North => pad[4] = down,
-                        Button::LeftTrigger => pad[1] = down,
-                        Button::RightTrigger => pad[2] = down,
-                        Button::Start => pad[0] = down,
-                        _ => {}
+                    if let Some(i) = PadInput::from_button(b) {
+                        self.input.pad(slot, i, matches!(ev.event, EventType::ButtonPressed(..)));
                     }
                 }
-                EventType::AxisChanged(Axis::LeftStickX, v, _) => {
-                    joy[2] = v < -0.5;
-                    joy[3] = v > 0.5;
+                EventType::AxisChanged(a, v, _) => {
+                    if let Some((neg, pos)) = PadInput::from_axis(a) {
+                        self.input.pad(slot, neg, v < -STICK_THRESHOLD);
+                        self.input.pad(slot, pos, v > STICK_THRESHOLD);
+                    }
                 }
-                EventType::AxisChanged(Axis::LeftStickY, v, _) => {
-                    joy[0] = v > 0.5;
-                    joy[1] = v < -0.5;
-                }
-                _ => {}
+                EventType::Disconnected => self.input.disconnect(ev.id),
+                _ => continue,
             }
+            changed = true;
+        }
+        if changed {
+            self.input.apply(&mut self.amiga.board);
         }
     }
 
@@ -504,7 +574,9 @@ impl ApplicationHandler for App {
                     }
                     return;
                 }
+                // A joystick in port 1 replaces the mouse.
                 match button {
+                    _ if self.amiga.board.port1_joystick => {}
                     MouseButton::Left => self.amiga.board.mouse_left = down,
                     MouseButton::Right => self.amiga.board.mouse_right = down,
                     _ => {}
@@ -534,8 +606,8 @@ impl ApplicationHandler for App {
                         }
                         KeyCode::Home => {
                             self.joy_keys = !self.joy_keys;
-                            self.amiga.board.joy = [false; 6];
-                            self.amiga.board.pad = [false; 5];
+                            self.input.held_keys.clear();
+                            self.input.apply(&mut self.amiga.board);
                             self.update_title();
                             return;
                         }
@@ -564,7 +636,9 @@ impl ApplicationHandler for App {
                         _ => {}
                     }
                 }
-                if self.joystick_key(code, down) {
+                if self.joy_keys && self.input.bound(code) {
+                    self.input.key(code, down);
+                    self.input.apply(&mut self.amiga.board);
                     return;
                 }
                 if let Some(k) = amiga_key(code) {
@@ -606,7 +680,7 @@ impl ApplicationHandler for App {
     }
 }
 
-pub fn run(mut amiga: Amiga, opts: Options) {
+pub fn run(mut amiga: Amiga, mut opts: Options) {
     eprintln!("{HELP}");
     let audio = start_audio();
     match &audio {
@@ -616,6 +690,14 @@ pub fn run(mut amiga: Amiga, opts: Options) {
     let speed_floor = amiga.board.cfg.cpu_speed_adaptive.then_some(amiga.board.cfg.cpu_speed);
     let fps = if amiga.board.cfg.ntsc { 59.94 } else { 50.0 };
     let gilrs = gilrs::Gilrs::new().ok();
+    let map = std::mem::take(&mut opts.input);
+    amiga.board.port1_joystick = map.port1_joystick;
+    let joy_keys = map.keys_on_at_start;
+    let mut input = Mapper::new(map);
+    // Number the gamepads already connected in the order the launcher lists them.
+    for (id, _) in gilrs.iter().flat_map(|g| g.gamepads()) {
+        input.slot(id);
+    }
     let mut app = App {
         amiga,
         opts,
@@ -625,10 +707,11 @@ pub fn run(mut amiga: Amiga, opts: Options) {
         frame_time: Duration::from_secs_f64(1.0 / fps),
         warp: false,
         grabbed: false,
-        joy_keys: false,
+        joy_keys,
         swap_index: 0,
         audio,
         gilrs,
+        input,
         fps_count: 0,
         fps_time: Instant::now(),
         tick: 0,
@@ -648,5 +731,59 @@ pub fn run(mut amiga: Amiga, opts: Options) {
         if let Err(e) = saved {
             log::warn!("saving NVRAM to {}: {e}", path.display());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn board() -> Board {
+        Board::new(amiga::config::Config::for_model(amiga::config::Model::A500), vec![0; 512 * 1024])
+    }
+
+    #[test]
+    fn keys_and_pads_work_the_ports() {
+        let mut map = InputMap::default();
+        map.set_key(1, JoyButton::Fire, Some("KeyQ"));
+        map.set_pad(PadInput::Select, Some(Action::Key(0x40)));
+        let mut m = Mapper::new(map);
+        let mut b = board();
+        m.key(KeyCode::ArrowUp, true);
+        m.key(KeyCode::KeyQ, true);
+        m.key(KeyCode::KeyP, true);
+        m.apply(&mut b);
+        assert_eq!(b.joy, [true, false, false, false, false, false]);
+        assert_eq!(b.joy1, [false, false, false, false, true, false]);
+        assert_eq!(b.pad, [true, false, false, false, false]);
+
+        // Gamepad 1 drives port 2 and gamepad 2 port 1 (the defaults); two
+        // inputs on one control keep it down until both are let go.
+        m.pad(0, PadInput::South, true);
+        m.pad(0, PadInput::RightTrigger, true);
+        m.pad(1, PadInput::DPadLeft, true);
+        m.pad(0, PadInput::Select, true);
+        m.apply(&mut b);
+        assert!(b.joy[4] && b.joy1[2] && b.joy1[4]);
+        assert!(m.pad_keys.contains(&0x40));
+        m.pad(0, PadInput::South, false);
+        m.apply(&mut b);
+        assert!(b.joy[4]);
+        m.pad(0, PadInput::RightTrigger, false);
+        m.pad(0, PadInput::Select, false);
+        m.apply(&mut b);
+        assert!(!b.joy[4] && m.pad_keys.is_empty());
+    }
+
+    #[test]
+    fn port1_joystick_replaces_the_mouse() {
+        use amiga::bus::Bus;
+        let mut b = board();
+        b.joy1 = [true, false, false, false, true, true];
+        assert_eq!(b.read16(0xdff00a), 0, "mouse counters while the mouse is plugged in");
+        b.port1_joystick = true;
+        assert_eq!(b.read16(0xdff00a), 0x0100, "JOY0DAT: up");
+        assert_eq!(b.read8(0xbfe001) & 0x40, 0, "CIA-A PA6: fire");
+        assert_eq!(b.read16(0xdff016) & 0x0400, 0, "POTGOR pin 9: fire 2");
     }
 }

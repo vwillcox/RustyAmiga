@@ -3,6 +3,7 @@
 ## Running
 
 - `./target/release/amiga` with no arguments opens the graphical launcher.
+- Controls: the launcher's Controls tab sets which host keys work the joystick in each port (while the keyboard joystick is on; Home switches it) and what each gamepad button and stick direction does: a joystick direction or button, a CD32 pad button, or an Amiga key. Port 1 can hold a joystick instead of the mouse for two-player games (JOY0DAT, fire on CIA-A PA6, fire 2 on POTGO pin 9). The first gamepad drives port 2 and the second port 1, unless set otherwise. The mapping is saved in `~/.config/amiga/input.json`, which the emulator window reads at start, so runs started from the command line use it too. The defaults are the old fixed layout.
 - `tools/install-desktop.sh` adds it to the desktop's application menu (Omarchy, GNOME, KDE...) with an icon; the entry starts in the checkout so the ROM and media folders are found.
 - `./target/release/amiga game.rp9` or `./target/release/amiga disk.adf` runs a title directly.
 - `--hdf image.hdf` (repeatable) attaches hard disks, SCSI IDs 0 up: to a disk controller chosen with `--board` (such as `a4091`), else the model's own (A3000 and A4000T SCSI, A600/A1200/A4000 IDE), else an A590/A2091 that is added for them.
@@ -12,7 +13,9 @@
   `Amiga Files/Shared/hdf` on the AF DVD) in `./hdf`.
   Packages built on host folders (AROS, Amiga 4000 Enhanced 3.X) need `Amiga Files/Shared/dir` in `./dir`.
 - Headless test options are listed by `--help`. They include `--headless`, `--screenshot`,
-  `--shot-every`, `--wav`, `--type FRAME:TEXT` and `--debug-dump`.
+  `--shot-every`, `--wav`, `--type FRAME:TEXT` and `--debug-dump`. `--clock "YYYY-MM-DD HH:MM:SS"`
+  starts the battery-backed clock at a fixed time instead of the host's. The time of day changes how
+  long the boot takes, and so where every later interrupt lands, so runs only repeat with it.
 - Debugging environment variables: `BREAK_AT` (with `BREAK_MIN_FRAME` to skip earlier hits), `TRACE_AT`,
   `TRACE_RANGE=lo-hi` (log every instruction in a range, with beam position and cycle count; `TRACE_FRAMES=a-b`
   limits it to those frames), `DISASM_AT`/`DISASM_N`, `DUMP_MEM=addr:len`, `AMIGA_LOG_EXCEPTIONS`, `AMIGA_LOG_DISK`.
@@ -89,7 +92,7 @@ The CD32 model has Akiko at `$B80000` (`src/akiko.rs`): the chip ID, the chunky-
 The CD drive (`src/akiko_cd.rs`, after WinUAE's akiko.cpp) talks to the ROM over Akiko's DMA rings. It supports the status/firmware, TOC, data read (raw sectors into the PBX slots), CD audio play/pause/stop, Q subchannel and LED commands. Discs are ISO files or CUE/BIN sheets with audio tracks (`src/cdimage.rs`). CD audio is mixed with Paula's output. CIA-A PA0 mutes it, because the CD32 has no ROM overlay bit; treating PA0 as the overlay made the CD player crash when it unmuted.
 - Amiga CD32 Gamer Vol. 12 (archive.org, CUE/BIN) boots to its menu.
 - Its audio tracks, in a cue sheet without the data track, play in the ROM's CD player, which shows the track and the running time.
-- The CD32 joypad is in port 2: in serial mode (POTGO drives pin 5 low), each rising edge on CIA-A PA7 shifts out the next button on pin 9 (blue, red, yellow, green, forward, reverse, play, then 1, 0). Gamepads map like the pad (A red, B blue, X green, Y yellow, shoulders reverse/forward, Start play). With the joystick keys on (Home), P is play, [ and ] reverse/forward, G green, Y yellow, and Right Alt blue. The CD player's Play and Forward buttons work.
+- The CD32 joypad is in port 2: in serial mode (POTGO drives pin 5 low), each rising edge on CIA-A PA7 shifts out the next button on pin 9 (blue, red, yellow, green, forward, reverse, play, then 1, 0). By default gamepads map like the pad (A red, B blue, X green, Y yellow, shoulders reverse/forward, Start play), and with the keyboard joystick on (Home) P is play, [ and ] reverse/forward, G green, Y yellow, and Right Alt blue. Both can be changed in the launcher's Controls tab. The CD player's Play and Forward buttons work.
 - POTINP reads back the pins that POTGO drives as outputs.
 - Not yet emulated: CD+G and audio scanning.
 
@@ -131,9 +134,9 @@ The 68000 core matches the SingleStepTests suite's cycle count for every one of 
 Floppy motor whirr, head steps (loading chugs; an empty drive clicks) and hard disk seeks, synthesized in `src/drivesound.rs` and mixed after Paula. Pause toggles them; `--no-drive-sounds` turns them off.
 
 ### Expansion boards and clocks
-Boards sit on one autoconfig chain (`src/expansion/`): Zorro II boards answer at `$E80000`, Zorro III boards at `$FF000000`, in slot order. `--board ID[:options]` adds a board from the registry (`--list-boards`), and the launcher has an Expansion boards section. The generic fast RAM options (`--fast`, `--z3`, RP9 RAM) and the A590/A2091 use the same chain. The plan for the rest of the boards is in `docs/ADDONS.md`.
+Boards sit on one autoconfig chain (`src/expansion/`): Zorro II boards answer at `$E80000`, Zorro III boards at `$FF000000`, in slot order. `--board ID[:options]` adds a board from the registry (`--list-boards`), and the launcher has an Expansion boards section. Boards only go where they would on the real machines: side-slot boxes (A560, Supra 500RX) on the A500, A500 Plus and A1000; Zorro II cards on the A2000, A3000 and A4000; Zorro III cards on the A3000 and A4000; trapdoor boards in their own model, one at a time. The A590/A2091 fits both side slot and Zorro II, but not the A3000, whose SCSI controller is the same chip. Controllers and the graphics card can be fitted once, and the Zorro slots run out (A2000, A4000 and A4000T 5, A3000 4). The launcher only offers boards that fit the model, greys out ones that don't fit next to those already fitted (the reason shows on hover), and removes fitted boards when the model changes to one that cannot take them. `--board` refuses the same combinations. The generic fast RAM options (`--fast`, `--z3`, RP9 RAM) and the A590/A2091 use the same chain. The plan for the rest of the boards is in `docs/ADDONS.md`.
 - RAM boards with their real IDs: A2052, A2058, A560, Supra 500RX/2000, MicroBotics 8-Up, GVP Impact Series II, Oktagon 2008, MBX 1200z; the A2091 can carry its own RAM (`a2091:ram=2M`).
-- Battery-backed clocks at `$DC0000`: OKI MSM6242B on the A2000 and A500+ and on the A501, A601 and MBX 1200z trapdoor boards; Ricoh RF5C01A on the A3000/A4000. They start at the host's local time and count emulated time (so warp mode does not confuse programs that time them); setting the date from AmigaOS holds for the session.
+- Battery-backed clocks at `$DC0000`: OKI MSM6242B on the A2000 and A500+ and on the A501, A601 and MBX 1200z trapdoor boards; Ricoh RF5C01A on the A3000/A4000. They start at the host's local time (or `--clock`) and count emulated time (so warp mode does not confuse programs that time them); setting the date from AmigaOS holds for the session.
 
 ### NCR 53C710: A4091 and A4000T
 The 53C710 runs SCRIPTS, its own programs fetched from memory by DMA (`src/ncr710.rs`): block moves (direct, indirect, table indirect), SELECT (also table indirect), WAIT DISCONNECT/RESELECT, SET/CLEAR ATN and ACK, jumps, calls, returns and INT on phase and data conditions with relative addressing, register arithmetic, and memory moves, including those that target the chip's own registers. The targets' side of the bus (`src/scsi.rs`) handles messages: IDENTIFY, synchronous and wide negotiation (answered as asynchronous, 8-bit), MESSAGE REJECT and ABORT. ATN and the ACK held after MESSAGE IN are modelled. Missing targets time out after 1 ms.
@@ -154,6 +157,7 @@ On an IDE port the CD-ROM drive is an ATAPI device (`src/gayle.rs`). It answers 
 ### Remaining open items
 - **Incision works but precalculates for a long time.** It renders its soundtrack first; at 64x the intro starts by frame 9000.
 - **Not emulated:** PowerPC boards, real RTG cards, and the user's own shared folder (`<harddrive root="shared"/>`, which is skipped). The Walker prototype's folders are not on the AF 11 DVD.
+- **GBG usually hangs at "loading..." headless at 32x (a bug in the demo).** Its vertical blank server calls a copy routine that starts with `sub.l a1,d3` (meant as `d1`) and only then saves D3, so the interrupted task loses D3. When that is the hard disk's filesystem, FFS checks a data block as a header and puts up a checksum requester behind the demo's screen. The demo's chunky-to-planar runs inside the same interrupt and takes most of each frame at 32x, so the filesystem is often the task interrupted. At `--cpu-speed 64` it loads every time.
 - **Not Amiga software:** the Videos and Gallery packages (DVD video and host images for Amiga Forever's player). The emulator now refuses them with that explanation.
 
 ## Known issues and open items

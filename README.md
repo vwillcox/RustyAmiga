@@ -24,7 +24,8 @@ behave as they did on a real machine.
 - **Amiga Forever titles:** most of the games and demos in the Amiga Forever collection run
   straight from their `.rp9` packages.
 - **Extras:** a graphical launcher, synthesized floppy and hard disk drive noises, front-panel
-  lights, and gamepad support.
+  lights, and gamepads. The launcher's Controls tab maps keys and gamepad buttons to the
+  joysticks and the CD32 pad, and can put a second joystick in port 1.
 
 ## Building
 

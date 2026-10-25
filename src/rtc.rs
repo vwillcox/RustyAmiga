@@ -122,6 +122,24 @@ fn local_utc_offset() -> i64 {
     0
 }
 
+/// Parse "YYYY-MM-DD" or "YYYY-MM-DD HH:MM[:SS]" (also with a T) as seconds
+/// since 1970.
+pub fn parse_time(s: &str) -> Option<i64> {
+    let (date, time) = s.trim().split_once([' ', 'T']).unwrap_or((s.trim(), "00:00"));
+    let d: Vec<u32> = date.split('-').map(|x| x.parse().ok()).collect::<Option<_>>()?;
+    let t: Vec<u32> = time.split(':').map(|x| x.parse().ok()).collect::<Option<_>>()?;
+    let (&[y, month, day], &[hour, min, ref sec @ ..]) = (d.as_slice(), t.as_slice()) else { return None };
+    let sec = match sec {
+        [] => 0,
+        &[s] => s,
+        _ => return None,
+    };
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || min > 59 || sec > 59 {
+        return None;
+    }
+    Some(from_tm(&Tm { year: y as i64, month, day, hour, min, sec, weekday: 0 }))
+}
+
 /// Two-digit years as battclock.resource reads them: 78-99 are 1978-1999.
 fn year_of(two_digits: u32) -> i64 {
     if two_digits >= 78 {
@@ -136,6 +154,12 @@ impl Rtc {
     pub fn new(kind: RtcKind, cck_rate: u32) -> Self {
         // MSM6242 control F: 24-hour mode.
         Rtc { kind, base: host_local_now(), elapsed: 0, ccks: 0, cck_rate, offset: 0, ctl: [0, 0, 4], mode: 0, h24: true, ram: [0; 26], held: None }
+    }
+
+    /// Start from `t` (seconds since 1970, local time) instead of the host's
+    /// clock, so that runs are repeatable.
+    pub fn set_start(&mut self, t: i64) {
+        self.base = t;
     }
 
     /// Advance by `ccks` colour clocks of emulated time.
@@ -373,6 +397,15 @@ mod tests {
             assert_eq!((tm.year, tm.month, tm.day), (1994, 12, 25), "{kind:?}");
             assert_eq!((r.read(y10), r.read(y1)), (9, 4));
         }
+    }
+
+    #[test]
+    fn parses_start_times() {
+        assert_eq!(parse_time("1970-01-02"), Some(86400));
+        assert_eq!(parse_time("2000-01-01 12:34:56"), Some(946730096));
+        assert_eq!(parse_time("2000-01-01T12:34"), Some(946730040));
+        assert_eq!(parse_time("2000-13-01"), None);
+        assert_eq!(parse_time("noon"), None);
     }
 
     #[test]

@@ -17,10 +17,11 @@ OS 3.X system is set up for (see below).
 
 **Test against real software.** The regression suite is the Amiga Forever collection: around 240
 games, demos and system packages in `.rp9` form. Every change is run against all of them with the
-old and new binaries, headless and in parallel, saving screenshots at fixed frames. Titles whose
-pictures change are put side by side on a contact sheet and checked by eye. Judging titles by
-several frames, not only the last one, avoids mistaking a demo's black gap between scenes for a
-failure.
+old and new binaries, headless and in parallel, saving screenshots at fixed frames. The
+battery-backed clock is pinned to the same time for every run, as the time of day changes how long
+booting takes and so the timing of everything after it. Titles whose pictures change are put side by
+side on a contact sheet and checked by eye. Judging titles by several frames, not only the last one,
+avoids mistaking a demo's black gap between scenes for a failure.
 
 **Test the CPU against the reference.** The 68000 core is checked against the SingleStepTests suite
 (261,894 cases), including the exact cycle count of each one.

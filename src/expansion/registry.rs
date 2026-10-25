@@ -12,9 +12,14 @@ use crate::rtc::RtcKind;
 /// Where a board plugs in.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Slot {
-    /// A Zorro II slot, or the A500/A1000 86-pin side slot (same bus).
+    /// The 86-pin side expansion connector of the A500, A500 Plus and A1000.
+    Side,
+    /// A Zorro II card slot (A2000; the A3000/A4000's Zorro III slots take
+    /// Zorro II cards too).
     Zorro2,
-    /// A Zorro III slot (A3000/A4000); Zorro II boards fit there too.
+    /// Sold both as a side-slot box and as a Zorro II card (A590 and A2091).
+    SideOrZorro2,
+    /// A Zorro III slot (A3000/A4000).
     Zorro3,
     /// The trapdoor (memory/CPU expansion slot underneath) of one model.
     Trapdoor(Model),
@@ -22,11 +27,12 @@ pub enum Slot {
 
 impl Slot {
     pub fn fits(self, model: Model) -> bool {
+        let side = matches!(model, Model::A500 | Model::A500Plus | Model::A1000);
+        let zorro2 = matches!(model, Model::A2000 | Model::A3000 | Model::A4000 | Model::A4000T);
         match self {
-            // Every Amiga but the CD32 takes Zorro II boards: in slots, through
-            // the A500/A1000 side expansion, or via a sidecar/bridge on the
-            // A600/A1200 (which is how these boards were used there).
-            Slot::Zorro2 => model != Model::Cd32,
+            Slot::Side => side,
+            Slot::Zorro2 => zorro2,
+            Slot::SideOrZorro2 => side || zorro2,
             Slot::Zorro3 => model.addr32(),
             Slot::Trapdoor(m) => m == model,
         }
@@ -34,10 +40,30 @@ impl Slot {
 
     pub fn describe(self) -> String {
         match self {
+            Slot::Side => "A500/A1000 side slot".into(),
             Slot::Zorro2 => "Zorro II".into(),
+            Slot::SideOrZorro2 => "side slot or Zorro II".into(),
             Slot::Zorro3 => "Zorro III".into(),
             Slot::Trapdoor(m) => format!("{m:?} trapdoor"),
         }
+    }
+
+    /// Takes one of the machine's Zorro card slots.
+    fn uses_zorro_slot(self, model: Model) -> bool {
+        match self {
+            Slot::Zorro2 | Slot::Zorro3 => true,
+            Slot::SideOrZorro2 => !Slot::Side.fits(model),
+            _ => false,
+        }
+    }
+}
+
+/// Zorro card slots in each model.
+fn zorro_slots(model: Model) -> usize {
+    match model {
+        Model::A2000 | Model::A4000 | Model::A4000T => 5,
+        Model::A3000 => 4,
+        _ => 0,
     }
 }
 
@@ -68,10 +94,53 @@ pub struct BoardInfo {
     pub slot: Slot,
     /// What the options mean, for `--list-boards`.
     pub options: &'static str,
+    /// Only one can be fitted (controllers; memory boards can be stacked).
+    pub single: bool,
+    /// Models whose own hardware the board would clash with, and why.
+    pub clashes: Option<(Model, &'static str)>,
     build: fn(&Options) -> Result<Parts, String>,
 }
 
 impl BoardInfo {
+    /// Why the board cannot go in `model`, if it cannot.
+    pub fn misfit(&self, model: Model) -> Option<String> {
+        if !self.slot.fits(model) {
+            return Some(match self.slot {
+                Slot::Side => "needs the A500/A1000 side slot".into(),
+                Slot::Zorro2 => "needs a Zorro II slot".into(),
+                Slot::SideOrZorro2 => "needs a side slot or a Zorro II slot".into(),
+                Slot::Zorro3 => "needs a Zorro III slot".into(),
+                Slot::Trapdoor(m) => format!("goes in the {m:?}'s trapdoor"),
+            });
+        }
+        match self.clashes {
+            Some((m, why)) if m == model => Some(why.into()),
+            _ => None,
+        }
+    }
+
+    /// Why the board cannot be added to `model` next to `fitted`, if it cannot.
+    pub fn cannot_add(&self, model: Model, fitted: &[&BoardInfo]) -> Option<String> {
+        if let Some(why) = self.misfit(model) {
+            return Some(why);
+        }
+        if self.single && fitted.iter().any(|b| b.id == self.id) {
+            return Some("only one can be fitted".into());
+        }
+        if matches!(self.slot, Slot::Trapdoor(_)) {
+            if let Some(b) = fitted.iter().find(|b| matches!(b.slot, Slot::Trapdoor(_))) {
+                return Some(format!("the trapdoor holds the {}", b.name));
+            }
+        }
+        if self.slot.uses_zorro_slot(model) {
+            let used = fitted.iter().filter(|b| b.slot.uses_zorro_slot(model)).count();
+            if used >= zorro_slots(model) {
+                return Some(format!("all {} Zorro slots are in use", zorro_slots(model)));
+            }
+        }
+        None
+    }
+
     /// What the board adds, with the given options.
     pub fn build(&'static self, opts: &Options) -> Result<Parts, String> {
         (self.build)(opts)
@@ -148,18 +217,20 @@ macro_rules! ram_board {
             year: $year,
             slot: $slot,
             options: concat!("ram=SIZE (default ", $default, "K)"),
+            single: false,
+            clashes: None,
             build: |o| Ok(vec![ram_card($id, $slot == Slot::Zorro3, o.size_kb("ram", $default, $sizes)?, $manuf, $prod)].into()),
         }
     };
 }
 
 pub static BOARDS: &[BoardInfo] = &[
-    ram_board!("z2ram", "Zorro II fast RAM", "generic", 1986, Slot::Zorro2, GENERIC, 1, 8192, Z2_SIZES),
+    ram_board!("z2ram", "Zorro II fast RAM", "generic", 1986, Slot::SideOrZorro2, GENERIC, 1, 8192, Z2_SIZES),
     ram_board!("z3ram", "Zorro III fast RAM", "generic", 1990, Slot::Zorro3, GENERIC, 2, 65536, Z3_SIZES),
     ram_board!("a2052", "A2052 2 MB RAM", "Commodore", 1987, Slot::Zorro2, COMMODORE_WC, 10, 2048, &[512, 1024, 2048]),
     ram_board!("a2058", "A2058 RAM", "Commodore", 1988, Slot::Zorro2, COMMODORE_WC, 10, 8192, &[2048, 4096, 8192]),
-    ram_board!("a560", "A560 RAM (A500 side slot)", "Commodore", 1988, Slot::Zorro2, COMMODORE_WC, 32, 2048, &[512, 1024, 2048]),
-    ram_board!("supra500rx", "Supra 500RX", "Supra", 1989, Slot::Zorro2, SUPRA, 10, 8192, &[512, 1024, 2048, 4096, 8192]),
+    ram_board!("a560", "A560 RAM (A500 side slot)", "Commodore", 1988, Slot::Side, COMMODORE_WC, 32, 2048, &[512, 1024, 2048]),
+    ram_board!("supra500rx", "Supra 500RX", "Supra", 1989, Slot::Side, SUPRA, 10, 8192, &[512, 1024, 2048, 4096, 8192]),
     ram_board!("supra2000", "SupraRAM 2000", "Supra", 1989, Slot::Zorro2, SUPRA, 9, 8192, &[2048, 4096, 8192]),
     ram_board!("microbotics8up", "8-Up! (Rev Z)", "Microbotics", 1989, Slot::Zorro2, MICROBOTICS, 4, 8192, &[2048, 4096, 8192]),
     ram_board!("gvpimpact2ram", "Impact Series II RAM", "GVP", 1990, Slot::Zorro2, GVP, 10, 8192, &[2048, 4096, 8192]),
@@ -169,8 +240,10 @@ pub static BOARDS: &[BoardInfo] = &[
         name: "A2091 / A590 SCSI controller",
         maker: "Commodore",
         year: 1989,
-        slot: Slot::Zorro2,
+        slot: Slot::SideOrZorro2,
         options: "ram=SIZE (0, 512K, 1M or 2M fitted on the board; default 0)",
+        single: true,
+        clashes: Some((Model::A3000, "the A3000 has this SCSI controller built in")),
         build: |o| {
             let mut cards = vec![Card {
                 board: "a2091",
@@ -201,6 +274,8 @@ pub static BOARDS: &[BoardInfo] = &[
         year: 1993,
         slot: Slot::Zorro3,
         options: "none",
+        single: true,
+        clashes: None,
         build: |_| {
             Ok(vec![Card {
                 board: "a4091",
@@ -227,6 +302,8 @@ pub static BOARDS: &[BoardInfo] = &[
         year: 2000,
         slot: Slot::Zorro3,
         options: "mem=SIZE video memory (4M to 256M, default 16M)",
+        single: true,
+        clashes: None,
         build: |o| {
             let kb = o.size_kb("mem", 16384, &Z3_SIZES[..7])?;
             Ok(vec![Card {
@@ -254,6 +331,8 @@ pub static BOARDS: &[BoardInfo] = &[
         year: 1987,
         slot: Slot::Trapdoor(Model::A500),
         options: "none",
+        single: true,
+        clashes: None,
         build: |_| Ok(Parts { slow_kb: Some(512), rtc: Some(RtcKind::Msm6242), ..Default::default() }),
     },
     BoardInfo {
@@ -263,6 +342,8 @@ pub static BOARDS: &[BoardInfo] = &[
         year: 1992,
         slot: Slot::Trapdoor(Model::A600),
         options: "none",
+        single: true,
+        clashes: None,
         build: |_| Ok(Parts { chip_kb: Some(2048), rtc: Some(RtcKind::Msm6242), ..Default::default() }),
     },
     BoardInfo {
@@ -272,6 +353,8 @@ pub static BOARDS: &[BoardInfo] = &[
         year: 1993,
         slot: Slot::Trapdoor(Model::A1200),
         options: "ram=SIZE (1M, 2M, 4M or 8M; default 4M)",
+        single: true,
+        clashes: None,
         build: |o| {
             let kb = o.size_kb("ram", 4096, &[1024, 2048, 4096, 8192])?;
             Ok(Parts { cards: vec![ram_card("mbx1200z", false, kb, MICROBOTICS, 0x81)], rtc: Some(RtcKind::Msm6242), ..Default::default() })
@@ -303,6 +386,27 @@ mod tests {
         let (b, o) = parse_spec("a2091:ram=2M").unwrap();
         assert_eq!(b.build(&o).unwrap().cards.len(), 2);
         assert!(parse_spec("nonesuch").is_err());
+    }
+
+    #[test]
+    fn boards_fit_their_models() {
+        let b = |id| find(id).unwrap();
+        assert!(b("a560").misfit(Model::A500).is_none());
+        assert!(b("a560").misfit(Model::A2000).is_some());
+        assert!(b("a2058").misfit(Model::A500).is_some());
+        assert!(b("a2058").misfit(Model::A4000).is_none());
+        assert!(b("a2091").misfit(Model::A500).is_none());
+        assert!(b("a2091").misfit(Model::A3000).is_some());
+        assert!(b("z2ram").misfit(Model::A1200).is_some());
+        assert!(b("uaegfx").misfit(Model::A2000).is_some());
+        assert!(b("a501").misfit(Model::A600).is_some());
+        // One trapdoor, one of each controller, and only as many cards as slots.
+        assert!(b("a501").cannot_add(Model::A500, &[b("a501")]).is_some());
+        assert!(b("a2091").cannot_add(Model::A2000, &[b("a2091")]).is_some());
+        assert!(b("a2058").cannot_add(Model::A2000, &[b("a2058"); 4]).is_none());
+        assert!(b("a2058").cannot_add(Model::A2000, &[b("a2058"); 5]).is_some());
+        // Side-slot boxes chain through each other.
+        assert!(b("a560").cannot_add(Model::A500, &[b("a560"); 6]).is_none());
     }
 
     #[test]
