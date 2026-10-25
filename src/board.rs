@@ -180,6 +180,13 @@ pub struct Board {
     pub pad: [bool; 5],
     /// The pad buttons as last seen, for the CDTV's remote buttons.
     pad_prev: [bool; 5],
+    /// The CDTV remote's mouse/joystick slider. In mouse mode the port 2
+    /// joystick is the remote's direction pad and A/B buttons, and works the
+    /// mouse port instead.
+    pub remote: crate::cdtv_remote::Remote,
+    /// The control that flips the slider is held (and was, last frame).
+    pub remote_switch: bool,
+    remote_switch_prev: bool,
     /// The CD32 joypad is plugged into port 2.
     pub cd32_pad: bool,
     /// The pad's shift register: bits left to send (8 = reloaded).
@@ -313,6 +320,9 @@ impl Board {
             joy: [false; 6],
             pad: [false; 5],
             pad_prev: [false; 5],
+            remote: Default::default(),
+            remote_switch: false,
+            remote_switch_prev: false,
             cd32_pad: cfg.model == crate::config::Model::Cd32,
             pad_shift: 8,
             pad_clock: false,
@@ -682,6 +692,11 @@ impl Board {
         if let Some(byte) = self.keyboard.tick(LINE_CCKS as u32) {
             self.cia_a.serial_in(byte);
         }
+        if self.remote.mouse() {
+            let rate = if self.cfg.ntsc { NTSC_CCK_RATE } else { PAL_CCK_RATE };
+            let (dx, dy) = self.remote.tick(LINE_CCKS as f64 * 1e6 / rate as f64, self.joy);
+            self.mouse_move(dx, dy);
+        }
         if self.vpos >= self.lines_per_frame() {
             self.vpos = 0;
             self.lof = if lace { !self.lof } else { true };
@@ -1033,12 +1048,21 @@ impl Board {
         self.cd32_pad && self.potgo & 0x2000 != 0 && self.potgo & 0x1000 == 0
     }
 
+    /// The joystick in port 2, unless it is the CDTV remote in mouse mode.
+    fn joy2(&self) -> [bool; 6] {
+        if self.remote.mouse() {
+            [false; 6]
+        } else {
+            self.joy
+        }
+    }
+
     fn cia_a_inputs(&self) -> u8 {
         let mut v = 0xffu8;
-        if self.joy[4] {
+        if self.joy2()[4] {
             v &= !0x80;
         }
-        if self.mouse_left || self.port1_joystick && self.joy1[4] {
+        if self.mouse_left || self.remote.buttons[0] || self.port1_joystick && self.joy1[4] {
             v &= !0x40;
         }
         for d in self.drives.iter().filter(|d| d.selected && d.present) {
@@ -1212,7 +1236,7 @@ impl Board {
             0x008 => 0,
             0x00a if self.port1_joystick => joy_dat(self.joy1),
             0x00a => (self.mouse_y as u16) << 8 | self.mouse_x as u16,
-            0x00c => joy_dat(self.joy),
+            0x00c => joy_dat(self.joy2()),
             0x00e => self.denise.read_clxdat(),
             0x010 => self.adkcon,
             0x012 => self.pot[0],
@@ -1225,7 +1249,7 @@ impl Board {
                         v &= !dat;
                     }
                 }
-                if self.mouse_right || self.port1_joystick && self.joy1[5] {
+                if self.mouse_right || self.remote.buttons[1] || self.port1_joystick && self.joy1[5] {
                     v &= !0x0400;
                 }
                 if self.pad_serial() {
@@ -1239,7 +1263,7 @@ impl Board {
                         n => !b[(n - 2).min(6) as usize],
                     };
                     v = v & !0x4000 | if high { 0x4000 } else { 0 };
-                } else if self.joy[5] {
+                } else if self.joy2()[5] {
                     v &= !0x4000;
                 }
                 v
@@ -1659,9 +1683,18 @@ impl Board {
     /// On the CDTV the CD32 pad's buttons stand in for the front panel and remote:
     /// play is play/pause, reverse and forward skip tracks, green is stop. They
     /// reach the machine as raw keys $72-$77, unless the ROM has put the drive in
-    /// front-panel mode, where the drive acts on them itself.
+    /// front-panel mode, where the drive acts on them itself. The remote
+    /// switch flips the remote between joystick and mouse mode.
     fn cdtv_buttons(&mut self) {
-        if self.cfg.model != crate::config::Model::Cdtv || self.pad == self.pad_prev {
+        if self.cfg.model != crate::config::Model::Cdtv {
+            return;
+        }
+        if self.remote_switch && !self.remote_switch_prev {
+            self.remote.set_mouse(!self.remote.mouse());
+            log::info!("CDTV remote: {} mode", if self.remote.mouse() { "mouse" } else { "joystick" });
+        }
+        self.remote_switch_prev = self.remote_switch;
+        if self.pad == self.pad_prev {
             return;
         }
         const BUTTON: [u8; 4] = [1, 2, 3, 0];

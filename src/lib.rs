@@ -5,6 +5,7 @@ pub mod akiko_cd;
 pub mod cd32fmv;
 pub mod cdimage;
 pub mod cdtv;
+pub mod cdtv_remote;
 pub mod board;
 pub mod bus;
 pub mod chipset;

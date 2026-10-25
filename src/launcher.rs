@@ -889,6 +889,15 @@ impl App {
             ui.label("Port 2 (joystick port)");
             ui.label("Joystick, or the CD32 pad on a CD32");
             ui.end_row();
+            ui.label("CDTV remote starts in");
+            ui.horizontal(|ui| {
+                ui.radio_value(&mut self.input.cdtv_remote_mouse, false, "Joystick mode");
+                ui.radio_value(&mut self.input.cdtv_remote_mouse, true, "Mouse mode").on_hover_text(
+                    "In mouse mode the port 2 directions and fire buttons move the pointer and press the mouse buttons, \
+                     at the speed of the real remote. The \"CDTV remote mouse/joystick\" control flips the remote's slider while running.",
+                );
+            });
+            ui.end_row();
         });
 
         ui.separator();
@@ -904,8 +913,9 @@ impl App {
             for b in JoyButton::ALL {
                 ui.label(b.label());
                 self.key_cell(ui, 2, b);
-                if b.cd32() {
-                    ui.label(egui::RichText::new("CD32 pad: port 2 only").weak());
+                if b.port2_only() {
+                    let only = if b.cd32() { "CD32 pad: port 2 only" } else { "Port 2 only" };
+                    ui.label(egui::RichText::new(only).weak());
                 } else {
                     ui.add_enabled_ui(self.input.port1_joystick, |ui| self.key_cell(ui, 1, b))
                         .response

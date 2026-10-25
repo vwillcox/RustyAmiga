@@ -23,10 +23,12 @@ pub enum JoyButton {
     Forward,
     Green,
     Yellow,
+    /// The CDTV remote's mouse/joystick slider (flips on each press).
+    RemoteSwitch,
 }
 
 impl JoyButton {
-    pub const ALL: [JoyButton; 11] = [
+    pub const ALL: [JoyButton; 12] = [
         JoyButton::Up,
         JoyButton::Down,
         JoyButton::Left,
@@ -38,6 +40,7 @@ impl JoyButton {
         JoyButton::Forward,
         JoyButton::Green,
         JoyButton::Yellow,
+        JoyButton::RemoteSwitch,
     ];
 
     pub fn label(self) -> &'static str {
@@ -53,12 +56,18 @@ impl JoyButton {
             JoyButton::Forward => "CD32 Forward",
             JoyButton::Green => "CD32 Green",
             JoyButton::Yellow => "CD32 Yellow",
+            JoyButton::RemoteSwitch => "CDTV remote mouse/joystick",
         }
     }
 
     /// A CD32 pad button (not on a plain joystick).
     pub fn cd32(self) -> bool {
-        (self as usize) >= JoyButton::Play as usize
+        matches!(self, JoyButton::Play | JoyButton::Reverse | JoyButton::Forward | JoyButton::Green | JoyButton::Yellow)
+    }
+
+    /// Only port 2 has it: the CD32 pad's buttons and the CDTV remote's switch.
+    pub fn port2_only(self) -> bool {
+        self.cd32() || self == JoyButton::RemoteSwitch
     }
 }
 
@@ -205,7 +214,7 @@ pub enum Action {
 impl Action {
     pub fn label(self) -> String {
         match self {
-            Action::Joy(b) if b.cd32() => b.label().to_string(),
+            Action::Joy(b) if b.port2_only() => b.label().to_string(),
             Action::Joy(b) => format!("Joystick {}", b.label()),
             Action::Key(k) => format!("Key {}", amiga_key_name(k)),
         }
@@ -233,6 +242,8 @@ pub struct InputMap {
     pub pad: Vec<(PadInput, Action)>,
     /// The joystick port the first and second gamepad drive.
     pub pad_ports: [u8; 2],
+    /// The CDTV remote starts in mouse mode.
+    pub cdtv_remote_mouse: bool,
 }
 
 impl Default for InputMap {
@@ -251,6 +262,7 @@ impl Default for InputMap {
             key("BracketRight", Forward),
             key("KeyG", Green),
             key("KeyY", Yellow),
+            key("KeyM", RemoteSwitch),
         ];
         // Laid out like the CD32 pad: red, blue, green, yellow on the face
         // buttons, shoulders reverse/forward, Start play.
@@ -271,8 +283,9 @@ impl Default for InputMap {
             (PadInput::LeftShoulder, Action::Joy(Reverse)),
             (PadInput::RightShoulder, Action::Joy(Forward)),
             (PadInput::Start, Action::Joy(Play)),
+            (PadInput::Select, Action::Joy(RemoteSwitch)),
         ];
-        InputMap { port1_joystick: false, keys_on_at_start: false, keys, pad, pad_ports: [2, 1] }
+        InputMap { port1_joystick: false, keys_on_at_start: false, keys, pad, pad_ports: [2, 1], cdtv_remote_mouse: false }
     }
 }
 

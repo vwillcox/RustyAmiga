@@ -118,12 +118,12 @@ impl Mapper {
     fn apply(&mut self, board: &mut Board) {
         let mut joy = [[false; 6]; 2];
         let mut cd32 = [false; 5];
-        let mut press = |port: u8, b: JoyButton| {
-            if !b.cd32() {
-                joy[(port == 2) as usize][b as usize] = true;
-            } else if port == 2 {
-                cd32[b as usize - JoyButton::Play as usize] = true;
-            }
+        let mut switch = false;
+        let mut press = |port: u8, b: JoyButton| match b {
+            _ if !b.port2_only() => joy[(port == 2) as usize][b as usize] = true,
+            _ if port != 2 => {}
+            JoyButton::RemoteSwitch => switch = true,
+            _ => cd32[b as usize - JoyButton::Play as usize] = true,
         };
         for k in &self.held_keys {
             if let Some(&(port, b)) = self.keys.get(k) {
@@ -142,6 +142,7 @@ impl Mapper {
         }
         [board.joy1, board.joy] = joy;
         board.pad = cd32;
+        board.remote_switch = switch;
         for &k in amiga_keys.difference(&self.pad_keys) {
             board.keyboard.key(k, true);
         }
@@ -162,6 +163,8 @@ struct App {
     warp: bool,
     grabbed: bool,
     joy_keys: bool,
+    /// The CDTV remote's slider as the title shows it.
+    remote_mouse: bool,
     swap_index: usize,
     audio: Option<(cpal::Stream, AudioBuf, u32)>,
     gilrs: Option<gilrs::Gilrs>,
@@ -193,7 +196,8 @@ Host keys:
   F11           toggle fullscreen    End        toggle warp speed
   Home          keyboard joystick on/off (keys and gamepad buttons are set in
                 the launcher's Controls tab; by default cursor keys, Right Ctrl
-                fire, Right Alt fire 2, CD32 pad P [ ] G Y)
+                fire, Right Alt fire 2, CD32 pad P [ ] G Y, CDTV remote's
+                mouse/joystick switch M)
   PageDown      next disk in swap list into DF0
   PageUp        hard reset           Insert     Amiga HELP key
   Pause         drive noises on/off
@@ -387,6 +391,9 @@ impl App {
             if self.joy_keys {
                 t.push_str(" [keyboard joystick]");
             }
+            if self.remote_mouse {
+                t.push_str(" [CDTV remote: mouse]");
+            }
             if self.warp {
                 t.push_str(" [warp]");
             }
@@ -444,6 +451,10 @@ impl App {
         let t = Instant::now();
         self.amiga.run_frame();
         self.busy += t.elapsed();
+        if self.amiga.board.remote.mouse() != self.remote_mouse {
+            self.remote_mouse = self.amiga.board.remote.mouse();
+            self.update_title();
+        }
         let samples = self.amiga.board.take_audio();
         if let Some((_, buf, rate)) = &self.audio {
             let mut q = buf.lock().unwrap();
@@ -692,6 +703,10 @@ pub fn run(mut amiga: Amiga, mut opts: Options) {
     let gilrs = gilrs::Gilrs::new().ok();
     let map = std::mem::take(&mut opts.input);
     amiga.board.port1_joystick = map.port1_joystick;
+    if amiga.board.cfg.model == amiga::config::Model::Cdtv {
+        amiga.board.remote.set_mouse(map.cdtv_remote_mouse);
+    }
+    let remote_mouse = amiga.board.remote.mouse();
     let joy_keys = map.keys_on_at_start;
     let mut input = Mapper::new(map);
     // Number the gamepads already connected in the order the launcher lists them.
@@ -708,6 +723,7 @@ pub fn run(mut amiga: Amiga, mut opts: Options) {
         warp: false,
         grabbed: false,
         joy_keys,
+        remote_mouse,
         swap_index: 0,
         audio,
         gilrs,
@@ -785,5 +801,24 @@ mod tests {
         assert_eq!(b.read16(0xdff00a), 0x0100, "JOY0DAT: up");
         assert_eq!(b.read8(0xbfe001) & 0x40, 0, "CIA-A PA6: fire");
         assert_eq!(b.read16(0xdff016) & 0x0400, 0, "POTGOR pin 9: fire 2");
+    }
+
+    #[test]
+    fn cdtv_remote_in_mouse_mode_works_the_mouse_port() {
+        use amiga::bus::Bus;
+        let mut m = Mapper::new(InputMap::default());
+        let mut b = board();
+        m.key(KeyCode::KeyM, true);
+        m.key(KeyCode::ArrowRight, true);
+        m.key(KeyCode::ControlRight, true);
+        m.apply(&mut b);
+        assert!(b.remote_switch);
+        assert_eq!(b.read16(0xdff00c), 0x0003, "JOY1DAT: right");
+        b.remote.set_mouse(true);
+        assert_eq!(b.read16(0xdff00c), 0, "the joystick port is idle in mouse mode");
+        assert_ne!(b.read8(0xbfe001) & 0x80, 0, "CIA-A PA7: no fire in port 2");
+        b.remote.buttons = [true, true];
+        assert_eq!(b.read8(0xbfe001) & 0x40, 0, "CIA-A PA6: A is the left button");
+        assert_eq!(b.read16(0xdff016) & 0x0400, 0, "POTGOR pin 9: B is the right button");
     }
 }

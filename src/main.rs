@@ -101,8 +101,10 @@ struct Args {
     #[arg(long = "type")]
     type_keys: Vec<String>,
     /// Headless: hold joystick buttons for 10 frames, e.g. "1200:fire" or
-    /// "900:right"; names are up, down, left, right, fire, fire2 and the CD32
-    /// pad's play, reverse, forward, green, yellow (joined by +).
+    /// "900:right", or from one frame to another ("900-1000:right"); names are
+    /// up, down, left, right, fire, fire2, the CD32 pad's play, reverse,
+    /// forward, green, yellow, and remote (the CDTV remote's mouse/joystick
+    /// switch), joined by +.
     #[arg(long = "joy")]
     joy_presses: Vec<String>,
     /// Headless: record audio output to a 16-bit stereo WAV file.
@@ -711,18 +713,23 @@ fn main() {
                 (f.parse().unwrap_or_else(|_| die("bad frame in --type")), amiga::keyboard::text_to_keys(text))
             })
             .collect();
-        const BUTTONS: [&str; 11] = ["up", "down", "left", "right", "fire", "fire2", "play", "reverse", "forward", "green", "yellow"];
-        let joy_presses: Vec<(u64, [bool; 11])> = args
+        const BUTTONS: [&str; 12] = ["up", "down", "left", "right", "fire", "fire2", "play", "reverse", "forward", "green", "yellow", "remote"];
+        let joy_presses: Vec<(std::ops::Range<u64>, [bool; 12])> = args
             .joy_presses
             .iter()
             .map(|t| {
                 let (f, names) = t.split_once(':').unwrap_or_else(|| die("--joy expects FRAME:BUTTONS"));
-                let mut b = [false; 11];
+                let mut b = [false; 12];
                 for n in names.split('+') {
                     let i = BUTTONS.iter().position(|&x| x == n);
                     b[i.unwrap_or_else(|| die(format!("unknown joystick button '{n}'")))] = true;
                 }
-                (f.parse().unwrap_or_else(|_| die("bad frame in --joy")), b)
+                let frame = |s: &str| s.parse::<u64>().unwrap_or_else(|_| die("bad frame in --joy"));
+                let held = match f.split_once('-') {
+                    Some((a, z)) => frame(a)..frame(z),
+                    None => frame(f)..frame(f) + 10,
+                };
+                (held, b)
             })
             .collect();
         let (mut hd_seen, mut hd_changed) = (0u64, 0u64);
@@ -753,9 +760,10 @@ fn main() {
                 }
                 !keys.is_empty()
             });
-            let held = joy_presses.iter().find(|(at, _)| (*at..*at + 10).contains(&f)).map_or([false; 11], |p| p.1);
+            let held = joy_presses.iter().find(|(at, _)| at.contains(&f)).map_or([false; 12], |p| p.1);
             amiga.board.joy.copy_from_slice(&held[..6]);
-            amiga.board.pad.copy_from_slice(&held[6..]);
+            amiga.board.pad.copy_from_slice(&held[6..11]);
+            amiga.board.remote_switch = held[11];
             if let (Some(n), Some(p)) = (args.shot_every, &args.screenshot) {
                 if f % n == 0 {
                     let stem = p.with_extension("");

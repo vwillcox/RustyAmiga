@@ -9,8 +9,8 @@ behave as they did on a real machine.
 ## What it runs
 
 - **Machines:** A1000, A500, A500+, A600, A2000, A1200, A3000, A4000, A4000T, the CD32 (with
-  its CD drive, CD audio, joypad and the FMV cartridge for Video CDs) and the CDTV (with its CD drive and player). Their NVRAM is
-  kept between sessions in `~/.config/amiga/nvram`.
+  its CD drive, CD audio, joypad and the FMV cartridge for Video CDs) and the CDTV (with its CD
+  drive, player and remote). Their NVRAM is kept between sessions in `~/.config/amiga/nvram`.
 - **Chipsets:** OCS, ECS and AGA, including HAM8, the AGA sprite and fetch modes, and the
   undocumented tricks that demos rely on.
 - **CPUs:** a cycle-exact 68000 (it matches all 261,894 SingleStepTests cases, including cycle
@@ -106,7 +106,8 @@ amiga --list-boards
 
 ## Status
 
-RustyAmiga is a work in progress. Not yet emulated: the CDTV remote's mouse mode, real RTG graphics cards, MMU address translation, the 68060, and PowerPC boards.
+RustyAmiga is a work in progress. Not yet emulated: real RTG graphics cards, MMU address
+translation, the 68060, and PowerPC boards.
 
 ## Licence
 

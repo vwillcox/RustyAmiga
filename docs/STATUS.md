@@ -3,12 +3,12 @@
 ## Running
 
 - `./target/release/amiga` with no arguments opens the graphical launcher.
-- Controls: the launcher's Controls tab sets which host keys work the joystick in each port (while the keyboard joystick is on; Home switches it) and what each gamepad button and stick direction does: a joystick direction or button, a CD32 pad button, or an Amiga key. Port 1 can hold a joystick instead of the mouse for two-player games (JOY0DAT, fire on CIA-A PA6, fire 2 on POTGO pin 9). The first gamepad drives port 2 and the second port 1, unless set otherwise. The mapping is saved in `~/.config/amiga/input.json`, which the emulator window reads at start, so runs started from the command line use it too. The defaults are the old fixed layout.
+- Controls: the launcher's Controls tab sets which host keys work the joystick in each port (while the keyboard joystick is on; Home switches it) and what each gamepad button and stick direction does: a joystick direction or button, a CD32 pad button, the CDTV remote's mouse/joystick switch, or an Amiga key. Port 1 can hold a joystick instead of the mouse for two-player games (JOY0DAT, fire on CIA-A PA6, fire 2 on POTGO pin 9). The first gamepad drives port 2 and the second port 1, unless set otherwise. The mapping is saved in `~/.config/amiga/input.json`, which the emulator window reads at start, so runs started from the command line use it too. The defaults are the old fixed layout.
 - `tools/install-desktop.sh` adds it to the desktop's application menu (Omarchy, GNOME, KDE...) with an icon; the entry starts in the checkout so the ROM and media folders are found.
 - `./target/release/amiga game.rp9` or `./target/release/amiga disk.adf` runs a title directly.
 - `--hdf image.hdf` (repeatable) attaches hard disks, SCSI IDs 0 up: to a disk controller chosen with `--board` (such as `a4091`), else the model's own (A3000 and A4000T SCSI, A600/A1200/A4000 IDE), else an A590/A2091 that is added for them.
 - `--cd image.iso` (or a `.cue` sheet with its BIN files) puts the disc in the CD32's or CDTV's drive. On other models it puts a SCSI CD-ROM drive at the next free SCSI ID on the same controller; a machine without SCSI gets an ATAPI drive on its IDE port (A600/A1200/A4000), or else an A590/A2091.
-- `--joy FRAME:BUTTONS` (headless) holds joystick buttons for 10 frames, e.g. `1100:fire` or `900:left+fire`; the CD32 pad's are play, reverse, forward, green and yellow.
+- `--joy FRAME:BUTTONS` (headless) holds joystick buttons for 10 frames, e.g. `1100:fire` or `900:left+fire`, or between two frames (`900-1000:right`); the CD32 pad's are play, reverse, forward, green and yellow, and `remote` flips the CDTV remote's mouse/joystick slider.
   RP9 hard disk titles also need the shared Amiga Forever boot disks (`workbench-135.hdf` etc. from
   `Amiga Files/Shared/hdf` on the AF DVD) in `./hdf`.
   Packages built on host folders (AROS, Amiga 4000 Enhanced 3.X) need `Amiga Files/Shared/dir` in `./dir`.
@@ -116,7 +116,9 @@ The CD controller (`src/cdtv.rs`, after WinUAE's cdtv.cpp) is the DMAC on the au
 - There is no floppy drive unless one is asked for (`--drives 1` or `--df0`), as on a stock CDTV. Kickstart 1.3's strap reads DF0 anyway (with no drive, /CHNG floats high, which reads as "disk present"). The read line then carries noise, as in WinUAE, so the read finds a sync and fails, and the boot moves on to the CD. Workbench shows a DF0:BAD icon.
 - The bookmark RAM is saved to `~/.config/amiga/nvram/cdtv.nvram` by windowed runs.
 - Front panel and remote: the CD buttons reach the machine as raw keys $72-$77 (stop, play/pause, previous, next, rewind, fast forward), or go straight to the drive while the ROM has it in front-panel mode (drive command $A3), as in WinUAE. The CD32 pad's buttons stand in for them: play is play/pause, reverse/forward are previous/next track, green is stop. So P, [, ], G with the joystick keys on, a gamepad's Start, shoulders and West button, or `--joy 800:play` headless. In the ROM's player these play, skip and stop.
-- Not yet emulated: CD+G subchannel bytes (SBCP), the remote's mouse/joystick mode and the memory card.
+- The remote's mouse mode (`src/cdtv_remote.rs`): the CDTV's game ports are driven by a 6500/1 (U75) that decodes the remote. With the remote's slider on "mouse", the port 2 directions and fire buttons work the mouse port instead: A is the left button and B the right. The timing follows the U75 firmware (Korinel's annotated disassembly) and the remote's protocol. While a button is held, the remote sends a frame every 60 ms: a full code (42.7 ms) when what is held changes, else a repeat code. U75 steps the mouse lines 4 counts for a full code and 8 for a repeat, and lets the buttons go about 56 ms after the last frame. So the pointer starts 43 ms after a press and moves 8 counts every 60 ms. The "CDTV remote mouse/joystick" control flips the slider: M with the joystick keys on, or a gamepad's Select (in the default layout), or `--joy 1:remote` headless. The launcher's Controls tab sets which mode the remote starts in, and the window title shows mouse mode. On CDPD Vol. 1 the remote moves the pointer, activates windows with A and drags them.
+- Joystick mode is the port 2 joystick, as before, without the remote's latency (a joystick adapter, in effect).
+- Not yet emulated: CD+G subchannel bytes (SBCP), the remote's numeric keys and the memory card.
 
 ### RTG: UAE's graphics card (uaegfx)
 `--board uaegfx[:mem=16M]` (A3000/A4000, 4-256 MB; RP9 `<peripheral>rtg</peripheral>`) adds UAE's virtual Picasso96 card (`src/rtg/`, after WinUAE's picasso96.cpp): a Zorro III board (2011/96) whose space is video RAM.
@@ -186,4 +188,4 @@ On an IDE port the CD-ROM drive is an ATAPI device (`src/gayle.rs`). It answers 
 ## Next milestones
 
 1. A3000 polish (the SDMAC works; nothing beyond booting is tested).
-2. CDTV: the remote's mouse/joystick mode, CD+G, the memory card.
+2. CDTV: CD+G, the memory card.
