@@ -150,6 +150,21 @@ pub trait Controller: Send {
     /// Press a CD button (0 stop, 1 play/pause, 2 previous, 3 next, 4 rewind,
     /// 5 fast forward) on a drive in front-panel mode.
     fn front_panel(&mut self, _button: u8) {}
+    /// A picture the board mixes into the display (the CD32 FMV cartridge's
+    /// genlock), while it is showing one.
+    fn overlay(&self) -> Option<Overlay<'_>> {
+        None
+    }
+}
+
+/// Video a board shows where the Amiga's picture is transparent: frame buffer
+/// pixels (0xAABBGGRR), and the colour around them. An empty picture shows
+/// the border colour alone.
+pub struct Overlay<'a> {
+    pub pixels: &'a [u32],
+    pub width: usize,
+    pub height: usize,
+    pub border: u32,
 }
 
 /// What a card does once configured.

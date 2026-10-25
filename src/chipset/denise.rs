@@ -91,6 +91,9 @@ pub struct Denise {
     line_has_data: bool,
 
     pub fb: Vec<u32>,
+    /// While a genlock is attached: the ZD (zero detect) output for each
+    /// frame buffer pixel, set where the picture is transparent.
+    pub zd: Option<Vec<bool>>,
 }
 
 /// 24-bit RGB to the framebuffer's RGBA byte order.
@@ -144,6 +147,7 @@ impl Denise {
             line_spr: [Sprite::default(); 8],
             line_has_data: false,
             fb: vec![0xff00_0000; FB_W * FB_H],
+            zd: None,
         }
     }
 
@@ -378,6 +382,7 @@ impl Denise {
 
         let mut ham: u32 = color[0];
         let mut out = [0u32; FB_W];
+        let mut zd_out = self.zd.is_some().then_some([false; FB_W]);
 
         let mut clx = 0u16;
         let clxcon = self.clxcon;
@@ -479,6 +484,17 @@ impl Denise {
             let dpf = bplcon0 & 0x400 != 0;
             let ham_mode = bplcon0 & 0x800 != 0 && !dpf;
             let xor = if aga { (bplcon4 >> 8) as usize } else { 0 };
+            if let Some(z) = zd_out.as_mut() {
+                // ZD: the border (unless BRDNTRAN), or the background colour
+                // with no sprite in front; or, with ZDBPEN, the plane ZDBPSEL picks.
+                z[i] = if !inside {
+                    self.bplcon3 & 0x10 == 0
+                } else if aga && bplcon2 & 0x800 != 0 {
+                    pf >> ((bplcon2 >> 12) & 7) & 1 != 0
+                } else {
+                    pf == 0 && spr_col.is_none()
+                };
+            }
             let c = if !inside {
                 if self.bplcon3 & 0x20 != 0 {
                     // BRDRBLNK: border is black instead of COLOR00.
@@ -558,14 +574,17 @@ impl Denise {
         }
         self.clxdat |= clx;
 
-        match interlace_field {
-            None => {
-                self.fb[row * FB_W..(row + 1) * FB_W].copy_from_slice(&out);
-                self.fb[(row + 1) * FB_W..(row + 2) * FB_W].copy_from_slice(&out);
-            }
+        let rows = match interlace_field {
+            None => row..row + 2,
             Some(long) => {
                 let r = row + if long { 0 } else { 1 };
-                self.fb[r * FB_W..(r + 1) * FB_W].copy_from_slice(&out);
+                r..r + 1
+            }
+        };
+        for r in rows {
+            self.fb[r * FB_W..(r + 1) * FB_W].copy_from_slice(&out);
+            if let (Some(zd), Some(z)) = (self.zd.as_mut(), zd_out.as_ref()) {
+                zd[r * FB_W..(r + 1) * FB_W].copy_from_slice(z);
             }
         }
     }

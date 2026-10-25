@@ -96,6 +96,16 @@ The CD drive (`src/akiko_cd.rs`, after WinUAE's akiko.cpp) talks to the ROM over
 - POTINP reads back the pins that POTGO drives as outputs.
 - Not yet emulated: CD+G and audio scanning.
 
+### CD32 FMV cartridge (Video CD)
+`--model cd32 --board cd32fmv --cd movie.cue` plugs the FMV cartridge into the CD32's expansion port (`src/cd32fmv.rs`; it fits nothing else). It needs its 256 KB ROM, `amiga-crt-310-cd32-fmv.rom` from Amiga Forever 11, which holds the player software and its own cd32mpeg.device. Register behaviour follows WinUAE's cd32_fmv.cpp; the timing and synchronisation come from disassembling cd32mpeg.device.
+- The 1 MB Zorro II board autoconfigures at `$200000`: ROM, a control/status word at +$40000, the L64111 audio decoder at +$50000, the CL450 video decoder's bitstream port at +$60000 and registers at +$70000, and its 512 KB DRAM at +$80000. Both chips interrupt on INT2.
+- The chips' microcode isn't run. Their commands are carried out directly, and the streams are decoded by `src/mpeg/`: MPEG-1 video (about 70 dB PSNR against ffmpeg) and MPEG-1 Layer II audio (within 1 LSB of ffmpeg), both written for this.
+- CL450: Reset, Play, Pause, NewPacket, AccessSCR, FlushBitstream, InquireBufferFullness, SetBlank, SetBorder, SetInterruptMask and SetThreshold, with the PIC-D, RDY and underflow interrupts. Each picture is shown when the clock (SCR) reaches the PTS of the packet it started in; pictures without one follow at the stream's rate.
+- L64111: the channel buffer (CB_WRITE, CB_READ, CB_STATUS), packet and frame detection, PTS reporting in PRESENT1-5 when a frame's header arrives, and NEW_FRAME_S when the frame starts playing. Its output is mixed with the CD audio; IO bit 9 mutes it.
+- The genlock: Denise drives ZD (zero detect: the border, the background colour with no sprite in front, or with AGA's ZDBPEN the selected plane), and at the end of each frame the video, doubled to fill the PAL screen and centred, replaces those pixels. The player's controls and pause icon appear over the movie.
+- Tested with Video CDs made by `examples/mkvcd.rs` from `ffmpeg -target pal-vcd` streams: the ROM finds the disc, plays it full screen with sound, pauses and resumes, and returns to its menu at the end of the disc. A test disc that flashes the picture with each beep shows them within a millisecond in emulated time, plus up to one frame for the display.
+- Not yet emulated: Scan, SingleStep, SlowMotion and DisplayStill (logged and ignored), SetWindow (the picture is always full screen), and playback control (PSD) menus. Only PAL discs and the PAL CD32 have been tried.
+
 ### CDTV
 `--model cdtv` (RP9 system `a-cdtv`) is an A500 with 1 MB of chip RAM, Kickstart 1.3, the CDTV extended ROM at $F00000 (`amiga-os-130-cdtv-ext.rom`, loaded automatically), a clock and 16 KB of battery-backed RAM at $DC8000.
 

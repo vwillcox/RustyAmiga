@@ -132,6 +132,27 @@ rtg.library leaves those routines to the card, so the emulator now does the draw
 fills, copies with any minterm, text templates, patterns and planar-to-chunky conversion, straight
 into video RAM. Booting got faster as well.
 
+### Video CDs on the CD32
+The FMV cartridge plays Video CDs with two decoder chips, a C-Cube CL450 for the picture and an LSI
+Logic L64111 for the sound. A genlock shows the video wherever the Amiga's picture is transparent.
+The chips' microcode isn't available, so RustyAmiga carries out their commands directly. The MPEG-1
+video and Layer II audio decoders behind them were written from scratch, with no libraries; the
+audio matches ffmpeg to within one bit. Denise now drives the ZD (zero detect) output, the signal
+a genlock uses to decide where the Amiga's picture is transparent. The cartridge's own player
+software then draws its controls over the movie.
+
+Keeping the picture in step with the sound was the hard part. The driver, cd32mpeg.device, makes
+the picture follow the sound, and the disassembly showed how. The L64111 reports each audio
+frame's time stamp as the frame arrives, and the driver files it in a table. When the chip says
+that frame has started playing, the driver loads the CL450's clock with the time stamp, but only
+if it agrees with the E-clock to within a millisecond. The first version raised "started playing"
+as soon as a frame arrived, and the clock jumped by whole seconds. Raising it at the real playback
+moment brought every correction down to a few ticks. Audio still ran dry at the start and after a
+pause, because the driver fills each chip until it reports a full buffer, and the CL450 reported
+only its input queue. Counting the data the video decoder holds as well fixed the stalls. A test
+disc whose picture flashes white each time a beep sounds shows the two within a millisecond of
+each other.
+
 ### Tools built along the way
 - **Instruction tracing:** `TRACE_RANGE`, `BREAK_AT` and `DUMP_MEM` show what software does at a
   given point, with beam position and cycle count.
@@ -139,10 +160,13 @@ into video RAM. Booting got faster as well.
 - **Scripted headless runs:** headless mode can type keys at a given frame, save screenshots at
   intervals, and record audio. A scratch folder with its own Startup-Sequence, mounted with
   `--dir-hd`, scripts tests inside AmigaOS.
+- **Video CD tools:** `examples/mkvcd.rs` turns an MPEG-1 program stream (from
+  `ffmpeg -target pal-vcd`) into a Video CD image, and `examples/mpegdec.rs` runs the cartridge's
+  decoders on a raw stream to compare their output with ffmpeg's.
 
 ## Where it is going
 
 The plan in [docs/ADDONS.md](docs/ADDONS.md) is to offer every Amiga add-on board as a machine
 option, by emulating each chip family once and describing boards as data on top of it. Next are more
 storage controllers (53C9x, 5380, IDE boards), real RTG graphics cards, accelerators with the 68060 and
-MMU, sound and network cards, and the CD32 FMV module.
+MMU, and sound and network cards.

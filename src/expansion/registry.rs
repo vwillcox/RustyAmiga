@@ -23,6 +23,8 @@ pub enum Slot {
     Zorro3,
     /// The trapdoor (memory/CPU expansion slot underneath) of one model.
     Trapdoor(Model),
+    /// The CD32's expansion port at the back.
+    Cd32Port,
 }
 
 impl Slot {
@@ -35,6 +37,7 @@ impl Slot {
             Slot::SideOrZorro2 => side || zorro2,
             Slot::Zorro3 => model.addr32(),
             Slot::Trapdoor(m) => m == model,
+            Slot::Cd32Port => model == Model::Cd32,
         }
     }
 
@@ -45,6 +48,7 @@ impl Slot {
             Slot::SideOrZorro2 => "side slot or Zorro II".into(),
             Slot::Zorro3 => "Zorro III".into(),
             Slot::Trapdoor(m) => format!("{m:?} trapdoor"),
+            Slot::Cd32Port => "CD32 expansion port".into(),
         }
     }
 
@@ -111,6 +115,7 @@ impl BoardInfo {
                 Slot::SideOrZorro2 => "needs a side slot or a Zorro II slot".into(),
                 Slot::Zorro3 => "needs a Zorro III slot".into(),
                 Slot::Trapdoor(m) => format!("goes in the {m:?}'s trapdoor"),
+                Slot::Cd32Port => "goes in the CD32's expansion port".into(),
             });
         }
         match self.clashes {
@@ -358,6 +363,35 @@ pub static BOARDS: &[BoardInfo] = &[
         build: |o| {
             let kb = o.size_kb("ram", 4096, &[1024, 2048, 4096, 8192])?;
             Ok(Parts { cards: vec![ram_card("mbx1200z", false, kb, MICROBOTICS, 0x81)], rtc: Some(RtcKind::Msm6242), ..Default::default() })
+        },
+    },
+    BoardInfo {
+        id: "cd32fmv",
+        name: "CD32 FMV cartridge (Video CD)",
+        maker: "Commodore",
+        year: 1994,
+        slot: Slot::Cd32Port,
+        options: "none",
+        single: true,
+        clashes: None,
+        build: |_| {
+            // As the cartridge ROM's own autoconfig nibbles give it.
+            Ok(vec![Card {
+                board: "cd32fmv",
+                ac: Autoconfig {
+                    zorro3: false,
+                    memory: false,
+                    diag_rom: Some(0x80),
+                    size: 1 << 20,
+                    manufacturer: COMMODORE_WC,
+                    product: 0x6a,
+                    serial: 0x0028_001e,
+                },
+                base: None,
+                state: CardState::Waiting,
+                dev: Device::Io(Box::<crate::cd32fmv::Fmv>::default()),
+            }]
+            .into())
         },
     },
 ];

@@ -9,7 +9,7 @@ behave as they did on a real machine.
 ## What it runs
 
 - **Machines:** A1000, A500, A500+, A600, A2000, A1200, A3000, A4000, A4000T, the CD32 (with
-  its CD drive, CD audio and joypad) and the CDTV (with its CD drive and player). Their NVRAM is
+  its CD drive, CD audio, joypad and the FMV cartridge for Video CDs) and the CDTV (with its CD drive and player). Their NVRAM is
   kept between sessions in `~/.config/amiga/nvram`.
 - **Chipsets:** OCS, ECS and AGA, including HAM8, the AGA sprite and fetch modes, and the
   undocumented tricks that demos rely on.
@@ -51,7 +51,8 @@ none are included. Here are the legal ways to get them.
   classic Amiga ROMs and OS. This is the easiest option, and the one RustyAmiga is built around. The
   Plus and Premium editions include every Kickstart version (1.0 to 3.X, for each model). They also
   include board ROMs that RustyAmiga uses: the A590/A2091 and A4091 SCSI boot ROMs, the CD32
-  extended ROM, and the CDTV and A570 extended ROMs. On top of that, they include the Workbench
+  extended ROM, the CD32 FMV cartridge ROM (in Amiga Forever 11), and the CDTV and A570 extended
+  ROMs. On top of that, they include the Workbench
   disks and a collection of licensed games and demos as `.rp9` packages. The ROMs are encrypted;
   copy them together with their `rom.key` and RustyAmiga decrypts them as it loads them. Check
   Cloanto's edition comparison before buying, because the cheaper editions include fewer ROMs.
@@ -93,6 +94,7 @@ ROMs dumped from real hardware and unencrypted ROM files also work; pass them wi
 amiga --model a1200 disk.adf
 amiga --model a4000 --board a4091 --hdf workbench.hdf --cd disc.iso
 amiga --model a600 --pcmcia some-folder/      # the folder becomes a formatted memory card
+amiga --model cd32 --board cd32fmv --cd movie.cue   # plays a Video CD
 amiga --list-boards
 ```
 
@@ -104,8 +106,7 @@ amiga --list-boards
 
 ## Status
 
-RustyAmiga is a work in progress. Not yet emulated: the CD32 FMV module, the CDTV remote's
-mouse mode, real RTG graphics cards, MMU address translation, the 68060, and PowerPC boards.
+RustyAmiga is a work in progress. Not yet emulated: the CDTV remote's mouse mode, real RTG graphics cards, MMU address translation, the 68060, and PowerPC boards.
 
 ## Licence
 

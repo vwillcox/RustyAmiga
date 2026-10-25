@@ -84,6 +84,9 @@ pub struct Board {
     pub nvram: Vec<u8>,
     /// UAE's virtual graphics card, when its VRAM board is fitted.
     pub rtg: Option<crate::rtg::Rtg>,
+    /// The display with a genlocked board's video mixed in (the CD32 FMV
+    /// cartridge), while it shows some.
+    genlock: Option<Vec<u32>>,
     rom_mask: u32,
     pub overlay: bool,
 
@@ -241,6 +244,7 @@ impl Board {
             boot_rom: vec![],
             nvram: if cfg.model == crate::config::Model::Cdtv { vec![0; 0x4000] } else { vec![] },
             rtg: None,
+            genlock: None,
             overlay: true,
             cycles: 0,
             cck: 0,
@@ -358,7 +362,45 @@ impl Board {
         if let Some(f) = self.rtg.as_ref().and_then(|r| r.framebuffer()) {
             return f;
         }
-        (&self.denise.fb, FB_W, FB_H)
+        (self.genlock.as_deref().unwrap_or(&self.denise.fb), FB_W, FB_H)
+    }
+
+    /// At the end of a frame, mix a board's video into the picture where
+    /// Denise's ZD output marks it transparent. The video is doubled both
+    /// ways (352x288 fills a PAL screen) and centred.
+    fn mix_genlock(&mut self) {
+        let overlay = self.exp.cards.iter().find_map(|c| match &c.dev {
+            Device::Io(d) => d.overlay(),
+            _ => None,
+        });
+        let Some(ov) = overlay else {
+            self.genlock = None;
+            self.denise.zd = None;
+            return;
+        };
+        // ZD is recorded from the next frame on.
+        let Some(zd) = self.denise.zd.as_ref() else {
+            self.denise.zd = Some(vec![false; FB_W * FB_H]);
+            return;
+        };
+        let out = self.genlock.get_or_insert_with(|| vec![0; FB_W * FB_H]);
+        out.copy_from_slice(&self.denise.fb);
+        let x0 = (FB_W as isize - 2 * ov.width as isize) / 2;
+        let y0 = (FB_H as isize - 2 * ov.height as isize) / 2;
+        for y in 0..FB_H {
+            let vy = (y as isize - y0) >> 1;
+            let row = (vy >= 0 && (vy as usize) < ov.height).then(|| &ov.pixels[vy as usize * ov.width..][..ov.width]);
+            for x in 0..FB_W {
+                if !zd[y * FB_W + x] {
+                    continue;
+                }
+                let vx = (x as isize - x0) >> 1;
+                out[y * FB_W + x] = match row {
+                    Some(r) if vx >= 0 && (vx as usize) < ov.width => r[vx as usize],
+                    _ => ov.border,
+                };
+            }
+        }
     }
 
     fn ocs(&self) -> bool {
@@ -648,6 +690,7 @@ impl Board {
             self.intreq |= int::VERTB;
             self.cia_a.tod_tick();
             self.cdtv_buttons();
+            self.mix_genlock();
             if let Some(r) = &mut self.rtg {
                 if r.on {
                     let card = &self.exp.cards[r.card];
